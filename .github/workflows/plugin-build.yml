@@ -29,25 +29,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install wasm-tools
-        run: |
-          curl -fsSL https://github.com/bytecodealliance/wasm-tools/releases/download/v1.256.0/wasm-tools-1.256.0-x86_64-linux.tar.gz \
-            | tar -xz -C /tmp
-          sudo install /tmp/wasm-tools-1.256.0-x86_64-linux/wasm-tools /usr/local/bin/
-
-      - name: Build hello-plugin and wrap as a component
+      - name: Build hello-plugin
         working-directory: ulb-plugins
-        run: |
-          cargo build -p hello-plugin --release --target wasm32-wasip2
-          wasm-tools component new \
-            target/wasm32-wasip2/release/hello_plugin.wasm \
-            -o target/wasm32-wasip2/release/hello-plugin.component.wasm
+        run: cargo build -p hello-plugin --release --target wasm32-wasip2
 
       - name: Run the component under the uliab host
         working-directory: Uliab
         run: |
           output="$(cargo run -p uliab -- run \
-            ../ulb-plugins/target/wasm32-wasip2/release/hello-plugin.component.wasm \
+            ../ulb-plugins/target/wasm32-wasip2/release/hello_plugin.wasm \
             'hello from CI' 2>&1)"
           echo "$output"
           grep -q 'hello-plugin says: hello from CI' <<<"$output"

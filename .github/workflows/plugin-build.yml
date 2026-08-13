@@ -31,7 +31,7 @@ jobs:
 
       - name: Install wasm-tools
         run: |
-          curl -fsSL https://github.com/bytecodealliance/wasm-tools/releases/download/wasm-tools-1.256.0/wasm-tools-1.256.0-x86_64-linux.tar.gz \
+          curl -fsSL https://github.com/bytecodealliance/wasm-tools/releases/download/v1.256.0/wasm-tools-1.256.0-x86_64-linux.tar.gz \
             | tar -xz -C /tmp
           sudo install /tmp/wasm-tools-1.256.0-x86_64-linux/wasm-tools /usr/local/bin/
 

@@ -33,11 +33,21 @@ jobs:
         working-directory: ulb-plugins
         run: cargo build -p hello-plugin --release --target wasm32-wasip2
 
+      - name: Build the uliab host
+        working-directory: Uliab
+        run: cargo build -p uliab
+
       - name: Run the component under the uliab host
         working-directory: Uliab
         run: |
-          output="$(cargo run -p uliab -- run \
+          set +e
+          output="$(cargo run -q -p uliab -- run \
             ../ulb-plugins/target/wasm32-wasip2/release/hello_plugin.wasm \
             'hello from CI' 2>&1)"
+          status=$?
+          set -e
           echo "$output"
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
           grep -q 'hello-plugin says: hello from CI' <<<"$output"

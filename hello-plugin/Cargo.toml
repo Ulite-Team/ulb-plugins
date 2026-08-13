@@ -1,0 +1,16 @@
+[package]
+name = "hello-plugin"
+description = "First ulb plugin: exports the ulb-plugin world and echoes its input back"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ulb-plugin-sdk = { path = "../../Uliab/crates/ulb-plugin-sdk" }
+wit-bindgen = "0.51"
+
+[lints]
+workspace = true

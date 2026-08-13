@@ -1,0 +1,53 @@
+name: plugin-build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ulb-plugins
+
+      # The plugin's path dep on ulb-plugin-sdk and the `path:` WIT source in
+      # `generate!` both resolve relative to the workspace layout this job
+      # mirrors from the dev machine: Uliab sits next to ulb-plugins.
+      - name: Checkout Uliab (plugin sdk + uliab host)
+        uses: actions/checkout@v4
+        with:
+          repository: Ulite-Team/Uliab
+          path: Uliab
+          token: ${{ secrets.ULITE_PAT }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-tools
+        run: |
+          curl -fsSL https://github.com/bytecodealliance/wasm-tools/releases/download/wasm-tools-1.256.0/wasm-tools-1.256.0-x86_64-linux.tar.gz \
+            | tar -xz -C /tmp
+          sudo install /tmp/wasm-tools-1.256.0-x86_64-linux/wasm-tools /usr/local/bin/
+
+      - name: Build hello-plugin and wrap as a component
+        working-directory: ulb-plugins/hello-plugin
+        run: |
+          cargo build --release --target wasm32-wasip2
+          wasm-tools component new \
+            target/wasm32-wasip2/release/hello_plugin.wasm \
+            -o target/wasm32-wasip2/release/hello-plugin.component.wasm
+
+      - name: Run the component under the uliab host
+        working-directory: Uliab
+        run: |
+          output="$(cargo run -p uliab -- run \
+            ../ulb-plugins/hello-plugin/target/wasm32-wasip2/release/hello-plugin.component.wasm \
+            'hello from CI' 2>&1)"
+          echo "$output"
+          grep -q 'hello-plugin says: hello from CI' <<<"$output"

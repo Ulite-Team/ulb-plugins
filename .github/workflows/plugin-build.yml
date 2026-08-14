@@ -51,3 +51,75 @@ jobs:
             exit "$status"
           fi
           grep -q 'hello-plugin says: hello from CI' <<<"$output"
+
+  registry-resolve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ulb-plugins
+
+      - name: Checkout Uliab (plugin sdk + uliab host)
+        uses: actions/checkout@v4
+        with:
+          repository: Ulite-Team/Uliab
+          path: Uliab
+          token: ${{ secrets.ULITE_PAT }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build hello-plugin
+        working-directory: ulb-plugins
+        run: cargo build -p hello-plugin --release --target wasm32-wasip2
+
+      - name: Build the uliab host
+        working-directory: Uliab
+        run: cargo build -p uliab
+
+      - name: Resolve the plugin through the registry client
+        working-directory: Uliab
+        run: |
+          # The committed index.json points at a release asset that does not
+          # exist yet; this job exercises the full resolve path against a
+          # local registry seeded from the checkout's build output instead.
+          mkdir -p /tmp/reg
+          cat > /tmp/reg/index.json <<'JSON'
+          {
+            "schema_version": 1,
+            "plugins": {
+              "ulite/hello": {
+                "versions": {
+                  "0.1.0": {
+                    "abi": { "min": "0.1", "max": "0.1" },
+                    "artifact_url": "hello_plugin.wasm"
+                  }
+                }
+              }
+            }
+          }
+          JSON
+          cp ../ulb-plugins/target/wasm32-wasip2/release/hello_plugin.wasm /tmp/reg/hello_plugin.wasm
+          printf 'plugins {\n  hello = "ulite/hello" @ "0.1.0"\n}\n' > /tmp/reg/libs.ulb
+          cache="$(mktemp -d)"
+          resolve() {
+            cargo run -q -p uliab -- plugins resolve --project /tmp/reg \
+              --registry /tmp/reg/index.json --cache-dir "$cache"
+          }
+          first="$(resolve)"
+          echo "$first"
+          grep -q '(registry)' <<<"$first"
+          second="$(resolve)"
+          echo "$second"
+          grep -q '(cache)' <<<"$second"
+          wasm="$(sed -n 's/.*-> \(.*\) (cache).*/\1/p' <<<"$second")"
+          output="$(cargo run -q -p uliab -- run "$wasm" 'hello from resolve CI' 2>&1)"
+          echo "$output"
+          grep -q 'hello-plugin says: hello from resolve CI' <<<"$output"
+
+      - name: Committed index.json is well-formed
+        run: jq -e '.schema_version == 1 and (.plugins | type) == "object"' ulb-plugins/registry/index.json >/dev/null
+

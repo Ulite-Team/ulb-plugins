@@ -19,7 +19,7 @@ mod bindings {
         world: "plugin",
     });
 
-    use exports::ulite::ulb::ulb_plugin::{PluginManifest, Guest};
+    use exports::ulite::ulb::ulb_plugin::{Guest, PluginManifest};
 
     /// Implements the exported `ulb-plugin` interface.
     struct HelloPlugin;
@@ -27,7 +27,10 @@ mod bindings {
     impl Guest for HelloPlugin {
         fn manifest() -> PluginManifest {
             PluginManifest {
-                name: "hello-plugin".to_string(),
+                // The registry identity the plugin is published under; the
+                // registry client verifies the manifest name against the
+                // coordinate it resolved.
+                name: "ulite/hello".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 abi_version: ulb_plugin_sdk::ABI_VERSION.to_string(),
             }

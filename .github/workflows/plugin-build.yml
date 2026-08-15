@@ -93,8 +93,8 @@ jobs:
             "plugins": {
               "ulite/hello": {
                 "versions": {
-                  "0.3.0": {
-                    "abi": { "min": "0.3", "max": "0.3" },
+                  "0.4.0": {
+                    "abi": { "min": "0.4", "max": "0.4" },
                     "artifact_url": "hello_plugin.wasm"
                   }
                 }
@@ -103,7 +103,7 @@ jobs:
           }
           JSON
           cp ../ulb-plugins/target/wasm32-wasip2/release/hello_plugin.wasm /tmp/reg/hello_plugin.wasm
-          printf 'plugins {\n  hello = "ulite/hello" @ "0.3.0"\n}\n' > /tmp/reg/libs.ulb
+          printf 'plugins {\n  hello = "ulite/hello" @ "0.4.0"\n}\n' > /tmp/reg/libs.ulb
           cache="$(mktemp -d)"
           resolve() {
             cargo run -q -p uliab -- plugins resolve --project /tmp/reg \
@@ -196,7 +196,7 @@ jobs:
             testClass = "AppTest"
           }
           ULB
-          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.3.0"\n}\n' > /tmp/jvm/libs.ulb
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.4.0"\n}\n' > /tmp/jvm/libs.ulb
           cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/jvm/jvm_plugin.wasm
           cat > /tmp/jvm/index.json <<'JSON'
           {
@@ -204,8 +204,8 @@ jobs:
             "plugins": {
               "ulite/jvm": {
                 "versions": {
-                  "0.3.0": {
-                    "abi": { "min": "0.3", "max": "0.3" },
+                  "0.4.0": {
+                    "abi": { "min": "0.4", "max": "0.4" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
                 }
@@ -255,7 +255,7 @@ jobs:
             jarFile = "build/app.jar"
           }
           ULB
-          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.3.0"\n}\n' > /tmp/jvm-kotlin/libs.ulb
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.4.0"\n}\n' > /tmp/jvm-kotlin/libs.ulb
           cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/jvm-kotlin/jvm_plugin.wasm
           cat > /tmp/jvm-kotlin/index.json <<'JSON'
           {
@@ -263,8 +263,8 @@ jobs:
             "plugins": {
               "ulite/jvm": {
                 "versions": {
-                  "0.3.0": {
-                    "abi": { "min": "0.3", "max": "0.3" },
+                  "0.4.0": {
+                    "abi": { "min": "0.4", "max": "0.4" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
                 }
@@ -354,7 +354,7 @@ jobs:
             testArgs = ["AppTest"]
           }
           ULB
-          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.3.0"\n}\n' > /tmp/jvm-junit/libs.ulb
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.4.0"\n}\n' > /tmp/jvm-junit/libs.ulb
           cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/jvm-junit/jvm_plugin.wasm
           cat > /tmp/jvm-junit/index.json <<'JSON'
           {
@@ -362,8 +362,8 @@ jobs:
             "plugins": {
               "ulite/jvm": {
                 "versions": {
-                  "0.3.0": {
-                    "abi": { "min": "0.3", "max": "0.3" },
+                  "0.4.0": {
+                    "abi": { "min": "0.4", "max": "0.4" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
                 }
@@ -402,6 +402,134 @@ jobs:
           sed -i '/implementation "org.slf4j:slf4j-api:2.0.16"/d' /tmp/jvm-junit/build.ulb
           if build; then
             echo "a missing implementation dep did not fail main compilation"
+            exit 1
+          fi
+
+  jvm-runner-discovery:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ulb-plugins
+
+      - name: Checkout Uliab (plugin sdk + uliab host)
+        uses: actions/checkout@v4
+        with:
+          repository: Ulite-Team/Uliab
+          path: Uliab
+          token: ${{ secrets.ULITE_PAT }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build jvm-plugin
+        working-directory: ulb-plugins
+        run: cargo build -p jvm-plugin --release --target wasm32-wasip2
+
+      - name: Build the uliab host
+        working-directory: Uliab
+        run: cargo build -p uliab
+
+      # The generated-runner path: `testRunner = "junit-platform"` makes the
+      # plugin write a JUnit Platform Launcher-API runner over the test
+      # classes directory, so no testClass/testArgs or console-standalone jar
+      # is needed and whatever engine the testImplementation deps resolve is
+      # discovered. A Jupiter engine proves discovery and the exit-code
+      # contract: a broken assertion fails the build.
+      - name: Generated runner discovers and runs Jupiter tests
+        working-directory: Uliab
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/jvm-runner/src
+          cat > /tmp/jvm-runner/src/App.java <<'JAVA'
+          public class App {
+              public static String greet() {
+                  return "hello";
+              }
+          }
+          JAVA
+          cat > /tmp/jvm-runner/src/AppTest.java <<'JAVA'
+          import org.junit.jupiter.api.Test;
+          import static org.junit.jupiter.api.Assertions.assertEquals;
+          class AppTest {
+              @Test
+              void greets() {
+                  assertEquals("hello", App.greet());
+              }
+          }
+          JAVA
+          cat > /tmp/jvm-runner/build.ulb <<'ULB'
+          deps {
+            implementation "org.slf4j:slf4j-api:2.0.16"
+            testImplementation "org.junit.platform:junit-platform-launcher:1.11.4"
+            testImplementation "org.junit.jupiter:junit-jupiter:5.11.4"
+          }
+          jvm {
+            sources = ["src/App.java"]
+            classesDir = "build/classes"
+            jarFile = "build/app.jar"
+            testSources = ["src/AppTest.java"]
+            testClassesDir = "build/test-classes"
+            testRunner = "junit-platform"
+          }
+          ULB
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.4.0"\n}\n' > /tmp/jvm-runner/libs.ulb
+          cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/jvm-runner/jvm_plugin.wasm
+          cat > /tmp/jvm-runner/index.json <<'JSON'
+          {
+            "schema_version": 1,
+            "plugins": {
+              "ulite/jvm": {
+                "versions": {
+                  "0.4.0": {
+                    "abi": { "min": "0.4", "max": "0.4" },
+                    "artifact_url": "jvm_plugin.wasm"
+                  }
+                }
+              }
+            }
+          }
+          JSON
+          cache="$(mktemp -d)"
+          uliab="$(pwd)/target/debug/uliab"
+          resolve() {
+            "$uliab" deps resolve --project /tmp/jvm-runner --cache-dir "$cache"
+          }
+          resolved="$(resolve)"
+          compile_bucket="$(sed -n '/^compile:/,/^runtime:/p' <<<"$resolved")"
+          test_compile_bucket="$(sed -n '/^testCompile:/,/^testRuntime:/p' <<<"$resolved")"
+          grep -q 'slf4j-api-2.0.16.jar' <<<"$compile_bucket"
+          ! grep -q 'junit' <<<"$compile_bucket"
+          grep -q 'junit-platform-launcher-1.11.4.jar' <<<"$test_compile_bucket"
+          grep -q 'junit-jupiter-5.11.4.jar' <<<"$test_compile_bucket"
+          grep -q 'junit-platform-engine' <<<"$test_compile_bucket"
+          build() {
+            "$uliab" build --project /tmp/jvm-runner \
+              --registry /tmp/jvm-runner/index.json --cache-dir "$cache"
+          }
+          first="$(build)"
+          echo "$first"
+          grep -q '5 ran, 0 up-to-date' <<<"$first"
+          test -f /tmp/jvm-runner/build/generated-test-src/ulite/TestRunner.java
+          test -f /tmp/jvm-runner/build/test-classes/ulite/TestRunner.class
+          grep -q '0 ran, 5 up-to-date' <<<"$(build)"
+          # A broken assertion must surface as a task failure, not a green
+          # build, and a test-source change must rerun only the test chain.
+          sed -i 's/"hello", App.greet()/"NOPE", App.greet()/' /tmp/jvm-runner/src/AppTest.java
+          if build > /tmp/jvm-runner/fail.log 2>&1; then
+            echo "a failing JUnit assertion did not fail the build"
+            exit 1
+          fi
+          grep -q 'AssertionFailedError' /tmp/jvm-runner/fail.log
+          sed -i 's/"NOPE", App.greet()/"hello", App.greet()/' /tmp/jvm-runner/src/AppTest.java
+          grep -q '2 ran, 3 up-to-date' <<<"$(build)"
+          grep -q '0 ran, 5 up-to-date' <<<"$(build)"
+          jar tf /tmp/jvm-runner/build/app.jar | grep -q 'App.class'
+          if jar tf /tmp/jvm-runner/build/app.jar | grep -q 'AppTest'; then
+            echo "the app jar must not contain the test classes"
             exit 1
           fi
 

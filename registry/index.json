@@ -3,12 +3,12 @@
   "plugins": {
     "ulite/hello": {
       "versions": {
-        "0.3.0": {
+        "0.4.0": {
           "abi": {
-            "min": "0.3",
-            "max": "0.3"
+            "min": "0.4",
+            "max": "0.4"
           },
-          "artifact_url": "https://github.com/Ulite-Team/ulb-plugins/releases/download/hello-plugin-v0.3.0/hello_plugin.wasm"
+          "artifact_url": "https://github.com/Ulite-Team/ulb-plugins/releases/download/hello-plugin-v0.4.0/hello_plugin.wasm"
         }
       }
     }

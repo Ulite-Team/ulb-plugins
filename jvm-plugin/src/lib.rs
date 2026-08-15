@@ -8,10 +8,13 @@
 //! javac over `.java` sources, `compile-kotlin` runs kotlinc over `.kt`
 //! sources (after `compile` when both coexist), `assemble` runs
 //! `jar cf <jarFile> -C <classesDir> .` after the compilers, and a
-//! `testSources`/`testClassesDir`/`testClass` trio adds `compile-tests`
-//! (javac over the test sources against the test-compile classpath) and
-//! `test` (`java -cp <testRuntime>:<testClassesDir>:<classesDir> <class>`).
-//! Paths written into the module block are resolved against the injected
+//! `testSources`/`testClassesDir` pair plus either a `testClass` or a
+//! `testRunner` adds `compile-tests` (javac over the test sources against
+//! the test-compile classpath) and `test` (a `java` run of the named
+//! runner). With `testRunner = "junit-platform"` the plugin generates a
+//! JUnit Platform Launcher-API runner over the test classes directory, so
+//! no console-standalone jar or explicit class list is needed. Paths
+//! written into the module block are resolved against the injected
 //! `projectDir`, so a build succeeds regardless of the directory the host
 //! was invoked from. Task inputs and outputs are the source files and the
 //! produced classes/jar, so the host's fingerprinting leaves a task alone
@@ -30,12 +33,14 @@ mod bindings {
     });
 
     use crate::{
-        compile_args, jar_args, partition_sources, reject_unknown_extensions, resolve_path,
-        run_test_args, string_list,
+        TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args, jar_args, partition_sources,
+        reject_unknown_extensions, resolve_path, run_test_args, string_list,
     };
     use exports::ulite::ulb::ulb_plugin::{Guest, PluginManifest};
     use serde_json::Value;
-    use ulite::ulb::task_registrar::{self, Action, AllowlistedTool, RunToolArgs, Task};
+    use ulite::ulb::task_registrar::{
+        self, Action, AllowlistedTool, RunToolArgs, Task, WriteFileArgs,
+    };
 
     /// Implements the exported `ulb-plugin` interface.
     struct JvmPlugin;
@@ -158,14 +163,17 @@ mod bindings {
     }
 
     /// Registers the `compile-tests` and `test` tasks when the module block
-    /// carries a test suite. The three keys must be set together: the test
-    /// sources, the directory their classes land in, and the fully-qualified
-    /// class with a `main` that `java` runs. An optional `testArgs` list
-    /// follows the class name on the command line, so the class can be a
-    /// framework runner (JUnitCore, the JUnit Platform console launcher)
-    /// that needs arguments of its own. Test compilation reuses the
-    /// main compile's tasks as a dependency so a changed main class forces
-    /// the tests to recompile, and the run task depends on that compilation.
+    /// carries a test suite. `testSources` and `testClassesDir` stand or
+    /// fall together, and the run target is exactly one of two forms:
+    /// `testClass` names a class with a `main` that `java` runs (an
+    /// optional `testArgs` list follows it, so the class can be a
+    /// framework runner such as JUnitCore), or `testRunner = "junit-platform"`
+    /// makes the plugin write [`TEST_RUNNER_SOURCE`] into the project and
+    /// run it instead, which discovers the tests by scanning the test
+    /// classes directory and needs neither a class list nor a
+    /// console-standalone jar. Test compilation reuses the main compile's
+    /// tasks as a dependency so a changed main class forces the tests to
+    /// recompile, and the run task depends on that compilation.
     fn register_tests(
         jvm: &Value,
         project_dir: &str,
@@ -175,25 +183,27 @@ mod bindings {
     ) -> Result<(), String> {
         let test_sources = jvm.get("testSources");
         let test_classes_dir = jvm.get("testClassesDir").and_then(Value::as_str);
-        let test_class = jvm.get("testClass").and_then(Value::as_str);
-        let test_keys_present = usize::from(test_sources.is_some())
-            + usize::from(test_classes_dir.is_some())
-            + usize::from(test_class.is_some());
-        if test_keys_present != 0 && test_keys_present != 3 {
+        if test_sources.is_none() != test_classes_dir.is_none() {
             return Err(
-                "the 'jvm' block must set testSources, testClassesDir, and testClass together"
-                    .to_owned(),
+                "the 'jvm' block must set testSources and testClassesDir together".to_owned(),
             );
         }
-        let (Some(_), Some(test_classes_dir), Some(test_class)) =
-            (test_sources, test_classes_dir, test_class)
-        else {
+        let Some(test_classes_dir) = test_classes_dir else {
             return Ok(());
         };
-        // Extra arguments passed to the runner after the class name, so a
-        // framework main (JUnitCore, the JUnit Platform console launcher)
-        // can receive the classes it should execute.
-        let test_args = optional_string_list(jvm, "testArgs")?;
+
+        let test_class = jvm.get("testClass").and_then(Value::as_str);
+        let test_runner = jvm.get("testRunner").and_then(Value::as_str);
+        if test_class.is_some() && test_runner.is_some() {
+            return Err(
+                "the 'jvm' block sets both testClass and testRunner; choose one".to_owned(),
+            );
+        }
+        if test_class.is_none() && test_runner.is_none() {
+            return Err(
+                "the 'jvm' block sets testSources without a testClass or testRunner".to_owned(),
+            );
+        }
 
         let test_sources = resolve_paths(project_dir, &string_list(jvm, "testSources")?);
         if test_sources.is_empty() {
@@ -218,14 +228,51 @@ mod bindings {
         test_runtime_classpath.push(test_classes_dir.clone());
         test_runtime_classpath.push(classes_dir.to_owned());
 
+        let mut compile_sources = test_sources.clone();
+        let mut compile_tests_depends = compile_tasks.to_vec();
+        let test_run_args;
+        if let Some(test_runner) = test_runner {
+            if test_runner != "junit-platform" {
+                return Err(format!(
+                    "unsupported testRunner '{test_runner}'; the supported value is \
+                     'junit-platform'"
+                ));
+            }
+            let generated_source = resolve_path(project_dir, TEST_RUNNER_SOURCE_PATH);
+            task_registrar::register_task(&Task {
+                name: "generate-test-runner".to_owned(),
+                inputs: Vec::new(),
+                outputs: vec![generated_source.clone()],
+                depends_on: Vec::new(),
+                action: Action::WriteFile(WriteFileArgs {
+                    path: generated_source.clone(),
+                    contents: TEST_RUNNER_SOURCE.to_owned(),
+                }),
+            })?;
+            compile_sources.push(generated_source.clone());
+            compile_tests_depends.push("generate-test-runner".to_owned());
+            test_run_args = run_test_args(
+                &test_runtime_classpath,
+                "ulite.TestRunner",
+                std::slice::from_ref(&test_classes_dir),
+            );
+        } else {
+            let test_class = test_class.expect("validated above");
+            // Extra arguments passed to the runner after the class name, so
+            // a framework main (JUnitCore, the JUnit Platform console
+            // launcher) can receive the classes it should execute.
+            let test_args = optional_string_list(jvm, "testArgs")?;
+            test_run_args = run_test_args(&test_runtime_classpath, test_class, &test_args);
+        }
+
         task_registrar::register_task(&Task {
             name: "compile-tests".to_owned(),
-            inputs: test_sources.clone(),
+            inputs: compile_sources.clone(),
             outputs: vec![test_classes_dir.clone()],
-            depends_on: compile_tasks.to_vec(),
+            depends_on: compile_tests_depends,
             action: Action::RunTool(RunToolArgs {
                 tool: AllowlistedTool::Javac,
-                args: compile_args(&test_classes_dir, &test_compile_classpath, &test_sources),
+                args: compile_args(&test_classes_dir, &test_compile_classpath, &compile_sources),
                 cwd: ".".to_owned(),
             }),
         })?;
@@ -237,7 +284,7 @@ mod bindings {
             depends_on: vec!["compile-tests".to_owned()],
             action: Action::RunTool(RunToolArgs {
                 tool: AllowlistedTool::Java,
-                args: run_test_args(&test_runtime_classpath, test_class, &test_args),
+                args: test_run_args,
                 cwd: ".".to_owned(),
             }),
         })?;
@@ -293,6 +340,61 @@ mod bindings {
     #[cfg(target_arch = "wasm32")]
     export!(JvmPlugin);
 }
+
+/// Where the generated JUnit Platform runner lands, relative to the
+/// injected project directory.
+const TEST_RUNNER_SOURCE_PATH: &str = "build/generated-test-src/ulite/TestRunner.java";
+
+/// The source of the runner the `testRunner = "junit-platform"` mode
+/// generates. It drives the JUnit Platform Launcher API directly: it scans
+/// the test classes directory passed on the command line, executes whatever
+/// engine is on the classpath (Jupiter, Vintage, ...), and exits non-zero
+/// when any test failed or errored so the `test` task fails the build. The
+/// Launcher API is stable across JUnit 5 versions, so the runner never
+/// needs the console-standalone jar and is agnostic to which engine — or
+/// version of one — the module resolves.
+const TEST_RUNNER_SOURCE: &str = r#"// Generated by the ulite/jvm plugin. Runs the tests compiled into the
+// directory given on the command line through the JUnit Platform Launcher
+// API; the engine(s) on the classpath are discovered automatically. Exits
+// non-zero when any test failed or errored.
+package ulite;
+
+import java.io.File;
+import java.io.PrintWriter;
+import java.util.Collections;
+
+import org.junit.platform.engine.discovery.DiscoverySelectors;
+import org.junit.platform.launcher.Launcher;
+import org.junit.platform.launcher.LauncherDiscoveryRequest;
+import org.junit.platform.launcher.core.LauncherDiscoveryRequestBuilder;
+import org.junit.platform.launcher.core.LauncherFactory;
+import org.junit.platform.launcher.listeners.SummaryGeneratingListener;
+import org.junit.platform.launcher.listeners.TestExecutionSummary;
+
+public final class TestRunner {
+    public static void main(String[] args) {
+        if (args.length != 1) {
+            System.err.println("usage: TestRunner <test-classes-dir>");
+            System.exit(2);
+        }
+        File classesDir = new File(args[0]);
+        LauncherDiscoveryRequest request = LauncherDiscoveryRequestBuilder.request()
+                .selectors(DiscoverySelectors.selectClasspathRoots(
+                        Collections.singleton(classesDir.toPath())))
+                .build();
+        Launcher launcher = LauncherFactory.create();
+        SummaryGeneratingListener listener = new SummaryGeneratingListener();
+        launcher.execute(request, listener);
+        TestExecutionSummary summary = listener.getSummary();
+        PrintWriter out = new PrintWriter(System.out, true);
+        summary.printTo(out);
+        summary.printFailuresTo(out);
+        if (summary.getTotalFailureCount() > 0) {
+            System.exit(1);
+        }
+    }
+}
+"#;
 
 /// Reads a string-list key of the module block, erroring when the key is
 /// absent or holds a non-string entry.
@@ -386,8 +488,8 @@ fn run_test_args(classpath: &[String], test_class: &str, args: &[String]) -> Vec
 #[cfg(test)]
 mod tests {
     use super::{
-        compile_args, jar_args, partition_sources, reject_unknown_extensions, resolve_path,
-        run_test_args, string_list,
+        TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args, jar_args, partition_sources,
+        reject_unknown_extensions, resolve_path, run_test_args, string_list,
     };
 
     #[test]
@@ -520,5 +622,36 @@ mod tests {
             vec!["a.java".to_owned(), "b.java".to_owned()]
         );
         assert!(string_list(&block, "missing").is_err());
+    }
+
+    #[test]
+    fn generated_runner_source_targets_the_launcher_api() {
+        assert!(TEST_RUNNER_SOURCE.contains("LauncherDiscoveryRequestBuilder.request()"));
+        assert!(TEST_RUNNER_SOURCE.contains("SummaryGeneratingListener"));
+        assert!(TEST_RUNNER_SOURCE.contains("summary.getTotalFailureCount() > 0"));
+        assert!(TEST_RUNNER_SOURCE.contains("class TestRunner"));
+        assert!(TEST_RUNNER_SOURCE_PATH.ends_with("ulite/TestRunner.java"));
+    }
+
+    #[test]
+    fn generated_runner_invocation_scan_arguments_follow_the_class() {
+        let args = run_test_args(
+            &[
+                "/repos/launcher.jar".to_owned(),
+                "/proj/build/test-classes".to_owned(),
+                "/proj/build/classes".to_owned(),
+            ],
+            "ulite.TestRunner",
+            &["/proj/build/test-classes".to_owned()],
+        );
+        assert_eq!(
+            args,
+            vec![
+                "-cp".to_owned(),
+                "/repos/launcher.jar:/proj/build/test-classes:/proj/build/classes".to_owned(),
+                "ulite.TestRunner".to_owned(),
+                "/proj/build/test-classes".to_owned(),
+            ]
+        );
     }
 }

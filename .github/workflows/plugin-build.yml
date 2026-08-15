@@ -151,20 +151,38 @@ jobs:
         working-directory: Uliab
         run: cargo build -p uliab
 
-      # A plain Java module built end to end: the driver resolves the plugin
-      # from a local index, configures it from the module's `jvm {}` block,
-      # and executes the javac/jar tasks. A second build from a different
+      - name: Install kotlinc
+        run: |
+          curl -sSLo /tmp/kotlin.zip https://github.com/JetBrains/kotlin/releases/download/v2.2.0/kotlin-compiler-2.2.0.zip
+          unzip -q /tmp/kotlin.zip -d /opt
+          echo "/opt/kotlinc/bin" >> "$GITHUB_PATH"
+
+      # A Java module with a test suite built end to end: the driver resolves
+      # the plugin from a local index, configures it from the module's
+      # `jvm {}` block, and executes the javac/java/jar tasks. The test task
+      # runs a class whose `main` writes a marker file, so the build's
+      # success plus the file's contents prove the runner executed the right
+      # program on the right classpath. A second build from a different
       # working directory must come back up-to-date and leave the jar intact,
       # proving the block's relative paths resolved against the project dir.
-      - name: Build a Java module into a jar
+      - name: Build a Java module with tests into a jar
         working-directory: Uliab
         run: |
           set -euxo pipefail
           mkdir -p /tmp/jvm/src
           cat > /tmp/jvm/src/App.java <<'JAVA'
           public class App {
-              public static void main(String[] args) {
-                  System.out.println("hello from the jvm plugin");
+              public static String hello() {
+                  return "hello from the jvm plugin";
+              }
+          }
+          JAVA
+          cat > /tmp/jvm/src/AppTest.java <<'JAVA'
+          import java.nio.file.Files;
+          import java.nio.file.Paths;
+          public class AppTest {
+              public static void main(String[] args) throws Exception {
+                  Files.write(Paths.get("/tmp/jvm/build/test-result.txt"), App.hello().getBytes());
               }
           }
           JAVA
@@ -173,9 +191,12 @@ jobs:
             sources = ["src/App.java"]
             classesDir = "build/classes"
             jarFile = "build/app.jar"
+            testSources = ["src/AppTest.java"]
+            testClassesDir = "build/test-classes"
+            testClass = "AppTest"
           }
           ULB
-          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.1.0"\n}\n' > /tmp/jvm/libs.ulb
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.2.0"\n}\n' > /tmp/jvm/libs.ulb
           cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/jvm/jvm_plugin.wasm
           cat > /tmp/jvm/index.json <<'JSON'
           {
@@ -183,7 +204,7 @@ jobs:
             "plugins": {
               "ulite/jvm": {
                 "versions": {
-                  "0.1.0": {
+                  "0.2.0": {
                     "abi": { "min": "0.3", "max": "0.3" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
@@ -200,12 +221,66 @@ jobs:
           }
           first="$(build)"
           echo "$first"
-          grep -q '2 ran, 0 up-to-date' <<<"$first"
+          grep -q '4 ran, 0 up-to-date' <<<"$first"
           test -f /tmp/jvm/build/app.jar
+          test "$(cat /tmp/jvm/build/test-result.txt)" = "hello from the jvm plugin"
           jar tf /tmp/jvm/build/app.jar | grep -q 'App.class'
           cd /
           second="$(build)"
           echo "$second"
-          grep -q '0 ran, 2 up-to-date' <<<"$second"
+          grep -q '0 ran, 4 up-to-date' <<<"$second"
+          # A changed main source reruns the whole chain, tests included.
+          sed -i 's/hello from the jvm plugin/hello from a changed source/' /tmp/jvm/src/App.java
+          third="$(build)"
+          echo "$third"
+          grep -q '4 ran, 0 up-to-date' <<<"$third"
+          test "$(cat /tmp/jvm/build/test-result.txt)" = "hello from a changed source"
+
+      # A Kotlin-only module: kotlinc compiles the sources and the jar packs
+      # them, with no javac task in the chain.
+      - name: Build a Kotlin module into a jar
+        working-directory: Uliab
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/jvm-kotlin/src
+          cat > /tmp/jvm-kotlin/src/Main.kt <<'KOTLIN'
+          fun main() {
+              println("hello from kotlin")
+          }
+          KOTLIN
+          cat > /tmp/jvm-kotlin/build.ulb <<'ULB'
+          jvm {
+            sources = ["src/Main.kt"]
+            classesDir = "build/classes"
+            jarFile = "build/app.jar"
+          }
+          ULB
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.2.0"\n}\n' > /tmp/jvm-kotlin/libs.ulb
+          cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/jvm-kotlin/jvm_plugin.wasm
+          cat > /tmp/jvm-kotlin/index.json <<'JSON'
+          {
+            "schema_version": 1,
+            "plugins": {
+              "ulite/jvm": {
+                "versions": {
+                  "0.2.0": {
+                    "abi": { "min": "0.3", "max": "0.3" },
+                    "artifact_url": "jvm_plugin.wasm"
+                  }
+                }
+              }
+            }
+          }
+          JSON
+          cache="$(mktemp -d)"
+          uliab="$(pwd)/target/debug/uliab"
+          build() {
+            "$uliab" build --project /tmp/jvm-kotlin \
+              --registry /tmp/jvm-kotlin/index.json --cache-dir "$cache"
+          }
+          first="$(build)"
+          echo "$first"
+          grep -q '2 ran, 0 up-to-date' <<<"$first"
+          jar tf /tmp/jvm-kotlin/build/app.jar | grep -q 'MainKt.class'
 
 

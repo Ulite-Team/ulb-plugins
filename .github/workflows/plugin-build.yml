@@ -196,7 +196,7 @@ jobs:
             testClass = "AppTest"
           }
           ULB
-          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.2.0"\n}\n' > /tmp/jvm/libs.ulb
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.3.0"\n}\n' > /tmp/jvm/libs.ulb
           cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/jvm/jvm_plugin.wasm
           cat > /tmp/jvm/index.json <<'JSON'
           {
@@ -204,7 +204,7 @@ jobs:
             "plugins": {
               "ulite/jvm": {
                 "versions": {
-                  "0.2.0": {
+                  "0.3.0": {
                     "abi": { "min": "0.3", "max": "0.3" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
@@ -255,7 +255,7 @@ jobs:
             jarFile = "build/app.jar"
           }
           ULB
-          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.2.0"\n}\n' > /tmp/jvm-kotlin/libs.ulb
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.3.0"\n}\n' > /tmp/jvm-kotlin/libs.ulb
           cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/jvm-kotlin/jvm_plugin.wasm
           cat > /tmp/jvm-kotlin/index.json <<'JSON'
           {
@@ -263,7 +263,7 @@ jobs:
             "plugins": {
               "ulite/jvm": {
                 "versions": {
-                  "0.2.0": {
+                  "0.3.0": {
                     "abi": { "min": "0.3", "max": "0.3" },
                     "artifact_url": "jvm_plugin.wasm"
                   }

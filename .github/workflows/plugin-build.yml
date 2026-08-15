@@ -93,8 +93,8 @@ jobs:
             "plugins": {
               "ulite/hello": {
                 "versions": {
-                  "0.2.0": {
-                    "abi": { "min": "0.2", "max": "0.2" },
+                  "0.3.0": {
+                    "abi": { "min": "0.3", "max": "0.3" },
                     "artifact_url": "hello_plugin.wasm"
                   }
                 }
@@ -103,7 +103,7 @@ jobs:
           }
           JSON
           cp ../ulb-plugins/target/wasm32-wasip2/release/hello_plugin.wasm /tmp/reg/hello_plugin.wasm
-          printf 'plugins {\n  hello = "ulite/hello" @ "0.2.0"\n}\n' > /tmp/reg/libs.ulb
+          printf 'plugins {\n  hello = "ulite/hello" @ "0.3.0"\n}\n' > /tmp/reg/libs.ulb
           cache="$(mktemp -d)"
           resolve() {
             cargo run -q -p uliab -- plugins resolve --project /tmp/reg \
@@ -184,7 +184,7 @@ jobs:
               "ulite/jvm": {
                 "versions": {
                   "0.1.0": {
-                    "abi": { "min": "0.2", "max": "0.2" },
+                    "abi": { "min": "0.3", "max": "0.3" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
                 }

@@ -20,6 +20,7 @@ following keys:
 | `testSources` | list of strings, optional | `.java` test files to compile. Kotlin test compilation is not supported yet. Requires `testClassesDir` and `testClass`. |
 | `testClassesDir` | string, optional | Directory `javac` writes test `.class` files to. |
 | `testClass` | string, optional | Fully qualified class with a `main` method that the `test` task runs. |
+| `testArgs` | list of strings, optional | Extra arguments passed to `testClass` after the class name (for framework runners such as `org.junit.runner.JUnitCore` or the JUnit Platform console launcher). |
 
 The test keys stand or fall together: all three must be set, or none.
 The values are resolved against the project directory the host injects
@@ -37,6 +38,33 @@ jvm {
   testClass = "com.example.AppTest"
 }
 ```
+
+Example with a JUnit 4 suite, where the runner comes from the
+`testImplementation` dependencies and the `testArgs` name the classes it
+should execute:
+
+```text
+deps {
+  implementation "org.slf4j:slf4j-api:2.0.16"
+  testImplementation "junit:junit:4.13.2"
+}
+
+jvm {
+  sources = ["src/App.java", "src/Util.kt"]
+  classesDir = "build/classes"
+  jarFile = "build/app.jar"
+  testSources = ["src/AppTest.java"]
+  testClassesDir = "build/test-classes"
+  testClass = "org.junit.runner.JUnitCore"
+  testArgs = ["com.example.AppTest"]
+}
+```
+
+`JUnitCore` exits non-zero when a test fails, so the `test` task fails
+the build on a broken assertion. The JUnit Platform console launcher
+(`org.junit.platform.console.ConsoleLauncher`, from the
+`junit-platform-console-standalone` artifact) works the same way, with
+its own `--scan-class-path` arguments in `testArgs`.
 
 ## Host-injected keys
 
@@ -58,7 +86,7 @@ them but they are not part of the `jvm {}` block:
 | `compile-kotlin` | `kotlinc` | `kotlinc -d <classesDir> [-cp <classpath.compile:classesDir>] <kotlin sources>` (only when the module has `.kt` sources; waits for `compile` when both exist) |
 | `assemble` | `jar` | `jar cf <jarFile> -C <classesDir> .` (after the present compile tasks) |
 | `compile-tests` | `javac` | `javac -d <testClassesDir> -cp <classpath.testCompile:classesDir> <testSources>` (only when the test keys are set) |
-| `test` | `java` | `java -cp <classpath.testRuntime:testClassesDir:classesDir> <testClass>` (after `compile-tests`) |
+| `test` | `java` | `java -cp <classpath.testRuntime:testClassesDir:classesDir> <testClass> [<testArgs>]` (after `compile-tests`) |
 
 Classpaths are joined with `:` (the separator of the unix hosts the
 toolchain targets). An empty main classpath omits `-cp` entirely.

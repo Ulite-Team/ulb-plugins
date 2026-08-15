@@ -160,7 +160,10 @@ mod bindings {
     /// Registers the `compile-tests` and `test` tasks when the module block
     /// carries a test suite. The three keys must be set together: the test
     /// sources, the directory their classes land in, and the fully-qualified
-    /// class with a `main` that `java` runs. Test compilation reuses the
+    /// class with a `main` that `java` runs. An optional `testArgs` list
+    /// follows the class name on the command line, so the class can be a
+    /// framework runner (JUnitCore, the JUnit Platform console launcher)
+    /// that needs arguments of its own. Test compilation reuses the
     /// main compile's tasks as a dependency so a changed main class forces
     /// the tests to recompile, and the run task depends on that compilation.
     fn register_tests(
@@ -187,6 +190,10 @@ mod bindings {
         else {
             return Ok(());
         };
+        // Extra arguments passed to the runner after the class name, so a
+        // framework main (JUnitCore, the JUnit Platform console launcher)
+        // can receive the classes it should execute.
+        let test_args = optional_string_list(jvm, "testArgs")?;
 
         let test_sources = resolve_paths(project_dir, &string_list(jvm, "testSources")?);
         if test_sources.is_empty() {
@@ -230,7 +237,7 @@ mod bindings {
             depends_on: vec!["compile-tests".to_owned()],
             action: Action::RunTool(RunToolArgs {
                 tool: AllowlistedTool::Java,
-                args: run_test_args(&test_runtime_classpath, test_class),
+                args: run_test_args(&test_runtime_classpath, test_class, &test_args),
                 cwd: ".".to_owned(),
             }),
         })?;
@@ -242,6 +249,26 @@ mod bindings {
         paths
             .iter()
             .map(|path| resolve_path(project_dir, path))
+            .collect()
+    }
+
+    /// Reads an optional string-list key of the module block; a missing key
+    /// is an empty list, a present non-list or non-string entry is an error.
+    fn optional_string_list(jvm: &Value, key: &str) -> Result<Vec<String>, String> {
+        let Some(value) = jvm.get(key) else {
+            return Ok(Vec::new());
+        };
+        let entries = value
+            .as_array()
+            .ok_or_else(|| format!("the 'jvm' block's '{key}' is not a list"))?;
+        entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("a 'jvm.{key}' entry is not a string"))
+            })
             .collect()
     }
 
@@ -347,12 +374,13 @@ fn jar_args(jar_file: &str, classes_dir: &str) -> Vec<String> {
 
 /// The `java` invocation for a test task: run the test class with the
 /// runtime classpath (test classes, app classes, and the resolved
-/// test-runtime jars, in that order).
-fn run_test_args(classpath: &[String], test_class: &str) -> Vec<String> {
-    vec!["-cp".to_owned(), classpath.join(":")]
-        .into_iter()
-        .chain(std::iter::once(test_class.to_owned()))
-        .collect()
+/// test-runtime jars, in that order), passing the optional `testArgs`
+/// entries after the class name.
+fn run_test_args(classpath: &[String], test_class: &str, args: &[String]) -> Vec<String> {
+    let mut invocation = vec!["-cp".to_owned(), classpath.join(":")];
+    invocation.push(test_class.to_owned());
+    invocation.extend(args.iter().cloned());
+    invocation
 }
 
 #[cfg(test)]
@@ -421,12 +449,34 @@ mod tests {
                 "/proj/build/classes".to_owned(),
             ],
             "com.example.AppTest",
+            &[],
         );
         assert_eq!(
             args,
             vec![
                 "-cp".to_owned(),
                 "/repos/junit.jar:/proj/build/test-classes:/proj/build/classes".to_owned(),
+                "com.example.AppTest".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_run_invocation_appends_runner_arguments_after_the_class() {
+        let args = run_test_args(
+            &[
+                "/proj/build/test-classes".to_owned(),
+                "/proj/build/classes".to_owned(),
+            ],
+            "org.junit.runner.JUnitCore",
+            &["com.example.AppTest".to_owned()],
+        );
+        assert_eq!(
+            args,
+            vec![
+                "-cp".to_owned(),
+                "/proj/build/test-classes:/proj/build/classes".to_owned(),
+                "org.junit.runner.JUnitCore".to_owned(),
                 "com.example.AppTest".to_owned(),
             ]
         );

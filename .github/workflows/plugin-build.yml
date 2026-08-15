@@ -283,4 +283,126 @@ jobs:
           grep -q '2 ran, 0 up-to-date' <<<"$first"
           jar tf /tmp/jvm-kotlin/build/app.jar | grep -q 'MainKt.class'
 
+  jvm-scoped-classpath:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ulb-plugins
+
+      - name: Checkout Uliab (plugin sdk + uliab host)
+        uses: actions/checkout@v4
+        with:
+          repository: Ulite-Team/Uliab
+          path: Uliab
+          token: ${{ secrets.ULITE_PAT }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build jvm-plugin
+        working-directory: ulb-plugins
+        run: cargo build -p jvm-plugin --release --target wasm32-wasip2
+
+      - name: Build the uliab host
+        working-directory: Uliab
+        run: cargo build -p uliab
+
+      # Scoped classpaths end to end: an `implementation` dependency must
+      # reach the module's compile/test classpaths but a `testImplementation`
+      # one must stay off the main compile classpath. The module's test suite
+      # runs through JUnitCore (the runner named by testClass, the test class
+      # passed in testArgs), so a broken assertion has to fail the build.
+      - name: Resolve scoped deps into the plugin's classpath buckets
+        working-directory: Uliab
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/jvm-junit/src
+          cat > /tmp/jvm-junit/src/App.java <<'JAVA'
+          public class App {
+              public static String message() {
+                  return org.slf4j.LoggerFactory.class.getSimpleName();
+              }
+          }
+          JAVA
+          cat > /tmp/jvm-junit/src/AppTest.java <<'JAVA'
+          import org.junit.Test;
+          import static org.junit.Assert.assertEquals;
+          public class AppTest {
+              @Test
+              public void compiledAgainstSlf4j() {
+                  assertEquals("LoggerFactory", App.message());
+              }
+          }
+          JAVA
+          cat > /tmp/jvm-junit/build.ulb <<'ULB'
+          deps {
+            implementation "org.slf4j:slf4j-api:2.0.16"
+            testImplementation "junit:junit:4.13.2"
+            testImplementation "org.hamcrest:hamcrest-core:1.3"
+          }
+          jvm {
+            sources = ["src/App.java"]
+            classesDir = "build/classes"
+            jarFile = "build/app.jar"
+            testSources = ["src/AppTest.java"]
+            testClassesDir = "build/test-classes"
+            testClass = "org.junit.runner.JUnitCore"
+            testArgs = ["AppTest"]
+          }
+          ULB
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.3.0"\n}\n' > /tmp/jvm-junit/libs.ulb
+          cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/jvm-junit/jvm_plugin.wasm
+          cat > /tmp/jvm-junit/index.json <<'JSON'
+          {
+            "schema_version": 1,
+            "plugins": {
+              "ulite/jvm": {
+                "versions": {
+                  "0.3.0": {
+                    "abi": { "min": "0.3", "max": "0.3" },
+                    "artifact_url": "jvm_plugin.wasm"
+                  }
+                }
+              }
+            }
+          }
+          JSON
+          cache="$(mktemp -d)"
+          uliab="$(pwd)/target/debug/uliab"
+          resolve() {
+            "$uliab" deps resolve --project /tmp/jvm-junit --cache-dir "$cache"
+          }
+          resolved="$(resolve)"
+          compile_bucket="$(sed -n '/^compile:/,/^runtime:/p' <<<"$resolved")"
+          test_compile_bucket="$(sed -n '/^testCompile:/,/^testRuntime:/p' <<<"$resolved")"
+          grep -q 'slf4j-api-2.0.16.jar' <<<"$compile_bucket"
+          ! grep -q 'junit/junit' <<<"$compile_bucket"
+          grep -q 'junit/junit/4.13.2' <<<"$test_compile_bucket"
+          grep -q 'slf4j-api-2.0.16.jar' <<<"$test_compile_bucket"
+          build() {
+            "$uliab" build --project /tmp/jvm-junit \
+              --registry /tmp/jvm-junit/index.json --cache-dir "$cache"
+          }
+          first="$(build)"
+          echo "$first"
+          grep -q '4 ran, 0 up-to-date' <<<"$first"
+          # A broken assertion must surface as a task failure, not a green build.
+          sed -i 's/"LoggerFactory", App.message()/"NOPE", App.message()/' /tmp/jvm-junit/src/AppTest.java
+          if build; then
+            echo "a failing JUnit assertion did not fail the build"
+            exit 1
+          fi
+          sed -i 's/"NOPE", App.message()/"LoggerFactory", App.message()/' /tmp/jvm-junit/src/AppTest.java
+          # Removing the implementation dep must break main compilation, proving
+          # testImplementation jars do not leak onto the main compile classpath.
+          sed -i '/implementation "org.slf4j:slf4j-api:2.0.16"/d' /tmp/jvm-junit/build.ulb
+          if build; then
+            echo "a missing implementation dep did not fail main compilation"
+            exit 1
+          fi
+
 

@@ -196,7 +196,7 @@ jobs:
             testClass = "AppTest"
           }
           ULB
-          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.4.0"\n}\n' > /tmp/jvm/libs.ulb
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.5.0"\n}\n' > /tmp/jvm/libs.ulb
           cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/jvm/jvm_plugin.wasm
           cat > /tmp/jvm/index.json <<'JSON'
           {
@@ -204,7 +204,7 @@ jobs:
             "plugins": {
               "ulite/jvm": {
                 "versions": {
-                  "0.4.0": {
+                  "0.5.0": {
                     "abi": { "min": "0.4", "max": "0.4" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
@@ -255,7 +255,7 @@ jobs:
             jarFile = "build/app.jar"
           }
           ULB
-          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.4.0"\n}\n' > /tmp/jvm-kotlin/libs.ulb
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.5.0"\n}\n' > /tmp/jvm-kotlin/libs.ulb
           cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/jvm-kotlin/jvm_plugin.wasm
           cat > /tmp/jvm-kotlin/index.json <<'JSON'
           {
@@ -263,7 +263,7 @@ jobs:
             "plugins": {
               "ulite/jvm": {
                 "versions": {
-                  "0.4.0": {
+                  "0.5.0": {
                     "abi": { "min": "0.4", "max": "0.4" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
@@ -354,7 +354,7 @@ jobs:
             testArgs = ["AppTest"]
           }
           ULB
-          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.4.0"\n}\n' > /tmp/jvm-junit/libs.ulb
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.5.0"\n}\n' > /tmp/jvm-junit/libs.ulb
           cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/jvm-junit/jvm_plugin.wasm
           cat > /tmp/jvm-junit/index.json <<'JSON'
           {
@@ -362,7 +362,7 @@ jobs:
             "plugins": {
               "ulite/jvm": {
                 "versions": {
-                  "0.4.0": {
+                  "0.5.0": {
                     "abi": { "min": "0.4", "max": "0.4" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
@@ -476,7 +476,7 @@ jobs:
             testRunner = "junit-platform"
           }
           ULB
-          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.4.0"\n}\n' > /tmp/jvm-runner/libs.ulb
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.5.0"\n}\n' > /tmp/jvm-runner/libs.ulb
           cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/jvm-runner/jvm_plugin.wasm
           cat > /tmp/jvm-runner/index.json <<'JSON'
           {
@@ -484,7 +484,7 @@ jobs:
             "plugins": {
               "ulite/jvm": {
                 "versions": {
-                  "0.4.0": {
+                  "0.5.0": {
                     "abi": { "min": "0.4", "max": "0.4" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
@@ -533,4 +533,114 @@ jobs:
             exit 1
           fi
 
+  jvm-ksp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ulb-plugins
 
+      - name: Checkout Uliab (plugin sdk + uliab host)
+        uses: actions/checkout@v4
+        with:
+          repository: Ulite-Team/Uliab
+          path: Uliab
+          token: ${{ secrets.ULITE_PAT }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build jvm-plugin
+        working-directory: ulb-plugins
+        run: cargo build -p jvm-plugin --release --target wasm32-wasip2
+
+      - name: Build the uliab host
+        working-directory: Uliab
+        run: cargo build -p uliab
+
+      - name: Install kotlinc
+        run: |
+          curl -sSLo /tmp/kotlin.zip https://github.com/JetBrains/kotlin/releases/download/v2.2.0/kotlin-compiler-2.2.0.zip
+          unzip -q /tmp/kotlin.zip -d /opt
+          echo "/opt/kotlinc/bin" >> "$GITHUB_PATH"
+
+      # A Kotlin module whose ksp deps route through the processor classpath:
+      # the ksp task runs the real KSP2 tool against the sources, the
+      # generated Kotlin feeds kotlinc, and assemble packages the classes.
+      # The fixture processor is built from this repo into a file:// maven
+      # layout, which the host's --repo flag adds ahead of Google/Maven
+      # Central (where the KSP2 toolchain jar comes from).
+      - name: Build a Kotlin module with ksp into a jar
+        working-directory: Uliab
+        run: |
+          set -euxo pipefail
+          bash ../ulb-plugins/fixtures/ksp-hello/build-fixture.sh /tmp/ksp-m2
+          mkdir -p /tmp/ksp-app/src
+          cat > /tmp/ksp-app/src/Main.kt <<'KOTLIN'
+          package app
+
+          import ulite.hello.Hello
+          import ulite.hello.generated.greetings
+
+          @Hello
+          class Main
+
+          fun main() {
+              println(greetings)
+          }
+          KOTLIN
+          cat > /tmp/ksp-app/build.ulb <<'ULB'
+          deps {
+            implementation "org.jetbrains.kotlin:kotlin-stdlib:2.2.0"
+            implementation "ulite:ksp-hello:1.0.0"
+            ksp "ulite:ksp-hello:1.0.0"
+            ksp "com.google.devtools.ksp:symbol-processing-aa:2.2.0-2.0.2"
+          }
+          jvm {
+            sources = ["src/Main.kt"]
+            classesDir = "build/classes"
+            jarFile = "build/app.jar"
+          }
+          ULB
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.5.0"\n}\n' > /tmp/ksp-app/libs.ulb
+          cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/ksp-app/jvm_plugin.wasm
+          cat > /tmp/ksp-app/index.json <<'JSON'
+          {
+            "schema_version": 1,
+            "plugins": {
+              "ulite/jvm": {
+                "versions": {
+                  "0.5.0": {
+                    "abi": { "min": "0.4", "max": "0.4" },
+                    "artifact_url": "jvm_plugin.wasm"
+                  }
+                }
+              }
+            }
+          }
+          JSON
+          cache="$(mktemp -d)"
+          uliab="$(pwd)/target/debug/uliab"
+          build() {
+            "$uliab" build --project /tmp/ksp-app \
+              --registry /tmp/ksp-app/index.json --cache-dir "$cache" --repo /tmp/ksp-m2
+          }
+          first="$(build)"
+          echo "$first"
+          grep -q '3 ran, 0 up-to-date' <<<"$first"
+          test -f /tmp/ksp-app/build/generated/ksp/kotlin/ulite/hello/generated/HelloGenerated.kt
+          test -f /tmp/ksp-app/build/classes/ulite/hello/generated/HelloGeneratedKt.class
+          grep -q '0 ran, 3 up-to-date' <<<"$(build)"
+          runtime="$( \
+            "$uliab" deps resolve --project /tmp/ksp-app --cache-dir "$cache" --repo /tmp/ksp-m2 \
+            | sed -n '/^runtime:/,/^processor:/p' | grep -v '^runtime:\|^processor:' | sed 's/^  //' | tr '\n' ':' \
+          )"
+          output="$(java -cp "/tmp/ksp-app/build/app.jar:$runtime" app.MainKt)"
+          test "$output" = "[hello from ksp for Main]"
+          sed -i 's/println(greetings)/println("second run"); println(greetings)/' /tmp/ksp-app/src/Main.kt
+          grep -q '3 ran, 0 up-to-date' <<<"$(build)"
+          output="$(java -cp "/tmp/ksp-app/build/app.jar:$runtime" app.MainKt)"
+          grep -q 'second run' <<<"$output"

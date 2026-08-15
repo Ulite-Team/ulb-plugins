@@ -13,7 +13,11 @@
 //! the test-compile classpath) and `test` (a `java` run of the named
 //! runner). With `testRunner = "junit-platform"` the plugin generates a
 //! JUnit Platform Launcher-API runner over the test classes directory, so
-//! no console-standalone jar or explicit class list is needed. Paths
+//! no console-standalone jar or explicit class list is needed. A module
+//! whose `deps {}` block carries `ksp` declarations gets a `ksp` task that
+//! runs the KSP compiler-command-line tool against the module's Kotlin
+//! sources, feeding the generated sources into the compile tasks and
+//! ordering generate → compile → package. Paths
 //! written into the module block are resolved against the injected
 //! `projectDir`, so a build succeeds regardless of the directory the host
 //! was invoked from. Task inputs and outputs are the source files and the
@@ -33,8 +37,9 @@ mod bindings {
     });
 
     use crate::{
-        TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args, jar_args, partition_sources,
-        reject_unknown_extensions, resolve_path, run_test_args, string_list,
+        TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args, jar_args, ksp_args,
+        ksp_output_dirs, partition_sources, reject_unknown_extensions, resolve_path, run_test_args,
+        string_list,
     };
     use exports::ulite::ulb::ulb_plugin::{Guest, PluginManifest};
     use serde_json::Value;
@@ -96,18 +101,57 @@ mod bindings {
             // The host already resolved the module's `deps {}` block into
             // jar paths; the plugin only decides how they reach the tools.
             let compile_classpath = classpath_bucket(&config, "compile");
+            let processor_classpath = classpath_bucket(&config, "processor");
 
-            // Main compilation: one javac task for the java sources, one
-            // kotlinc task for the kotlin sources. Kotlin can see the java
-            // classes, so the kotlin task waits for the java one when both
-            // source sets exist.
+            // KSP processes the module's kotlin sources before either
+            // compiler runs. Its runner and the processors come from the
+            // `processor` bucket, which holds the `ksp` declarations, so a
+            // module with ksp deps must also have kotlin sources.
+            let mut ksp_generated = None;
+            if !processor_classpath.is_empty() {
+                if kotlin_sources.is_empty() {
+                    return Err("the module declares ksp deps but has no .kt sources".to_owned());
+                }
+                let (kotlin_out, java_out) = ksp_output_dirs(project_dir);
+                task_registrar::register_task(&Task {
+                    name: "ksp".to_owned(),
+                    inputs: kotlin_sources.clone(),
+                    outputs: vec![kotlin_out.clone(), java_out.clone()],
+                    depends_on: Vec::new(),
+                    action: Action::RunTool(RunToolArgs {
+                        tool: AllowlistedTool::Java,
+                        args: ksp_args(
+                            project_dir,
+                            &kotlin_sources,
+                            &compile_classpath,
+                            &processor_classpath,
+                        ),
+                        cwd: ".".to_owned(),
+                    }),
+                })?;
+                ksp_generated = Some((kotlin_out, java_out));
+            }
+
+            // Main compilation: one javac task for the module's own java
+            // sources, one kotlinc task for the kotlin sources. Kotlin can
+            // see the java classes, so the kotlin task waits for the java
+            // one when both source sets exist; when ksp ran, its generated
+            // kotlin directory joins the kotlinc task's source list (the
+            // generated java directory stays a ksp output: kotlinc emits no
+            // classes for `.java` sources, and javac requires an explicit
+            // file list that a task's static inputs cannot enumerate after
+            // ksp runs). Both compilers wait for ksp to finish generating.
             let mut compile_tasks = Vec::new();
             if !java_sources.is_empty() {
+                let mut depends_on = Vec::new();
+                if ksp_generated.is_some() {
+                    depends_on.push("ksp".to_owned());
+                }
                 task_registrar::register_task(&Task {
                     name: "compile".to_owned(),
                     inputs: java_sources.clone(),
                     outputs: vec![classes_dir.clone()],
-                    depends_on: Vec::new(),
+                    depends_on,
                     action: Action::RunTool(RunToolArgs {
                         tool: AllowlistedTool::Javac,
                         args: compile_args(&classes_dir, &compile_classpath, &java_sources),
@@ -117,9 +161,14 @@ mod bindings {
                 compile_tasks.push("compile".to_owned());
             }
             if !kotlin_sources.is_empty() {
+                let mut kotlinc_sources = kotlin_sources.clone();
                 let mut depends_on = Vec::new();
                 if !java_sources.is_empty() {
                     depends_on.push("compile".to_owned());
+                }
+                if let Some((kotlin_out, _)) = &ksp_generated {
+                    kotlinc_sources.push(kotlin_out.clone());
+                    depends_on.push("ksp".to_owned());
                 }
                 // The kotlin compiler resolves the module's own java classes
                 // the same way it would resolve a dependency jar, so the
@@ -128,12 +177,12 @@ mod bindings {
                 kotlin_classpath.push(classes_dir.clone());
                 task_registrar::register_task(&Task {
                     name: "compile-kotlin".to_owned(),
-                    inputs: kotlin_sources.clone(),
+                    inputs: kotlinc_sources.clone(),
                     outputs: vec![classes_dir.clone()],
                     depends_on,
                     action: Action::RunTool(RunToolArgs {
                         tool: AllowlistedTool::Kotlinc,
-                        args: compile_args(&classes_dir, &kotlin_classpath, &kotlin_sources),
+                        args: compile_args(&classes_dir, &kotlin_classpath, &kotlinc_sources),
                         cwd: ".".to_owned(),
                     }),
                 })?;
@@ -485,11 +534,66 @@ fn run_test_args(classpath: &[String], test_class: &str, args: &[String]) -> Vec
     invocation
 }
 
+/// The directories KSP writes its generated sources into, as a
+/// `(kotlin, java)` pair. The compile tasks add these to their source
+/// lists, so the ordering contract is generate → compile → package.
+fn ksp_output_dirs(project_dir: &str) -> (String, String) {
+    (
+        format!("{project_dir}/build/generated/ksp/kotlin"),
+        format!("{project_dir}/build/generated/ksp/java"),
+    )
+}
+
+/// The `java` invocation that runs the KSP command-line tool against the
+/// module's kotlin sources. The `-cp` is the processor classpath: the
+/// `ksp` declarations, headed by the KSP2 toolchain jar whose
+/// `com.google.devtools.ksp.cmdline.KSPJvmMain` main class is the entry
+/// point. The same classpath is passed again as the final positional
+/// argument, which KSP uses to load the `ProcessorProvider` services.
+/// The compile classpath becomes `-libraries` so the processors resolve
+/// the module's own dependencies, and the generated sources land in the
+/// `*-output-dir` directories (`ksp_output_dirs`).
+fn ksp_args(
+    project_dir: &str,
+    kotlin_sources: &[String],
+    compile_classpath: &[String],
+    processor_classpath: &[String],
+) -> Vec<String> {
+    let (kotlin_out, java_out) = ksp_output_dirs(project_dir);
+    let mut args = vec![
+        "-cp".to_owned(),
+        processor_classpath.join(":"),
+        "com.google.devtools.ksp.cmdline.KSPJvmMain".to_owned(),
+        "-jvm-target".to_owned(),
+        "11".to_owned(),
+        "-module-name".to_owned(),
+        "main".to_owned(),
+        format!("-source-roots={}", kotlin_sources.join(":")),
+        format!("-project-base-dir={project_dir}"),
+        format!("-output-base-dir={project_dir}/build"),
+        format!("-caches-dir={project_dir}/build/ksp-caches"),
+        format!("-class-output-dir={project_dir}/build/ksp-classes"),
+        format!("-kotlin-output-dir={kotlin_out}"),
+        format!("-java-output-dir={java_out}"),
+        format!("-resource-output-dir={project_dir}/build/ksp-resources"),
+        "-language-version".to_owned(),
+        "2.0".to_owned(),
+        "-api-version".to_owned(),
+        "2.0".to_owned(),
+    ];
+    if !compile_classpath.is_empty() {
+        args.push(format!("-libraries={}", compile_classpath.join(":")));
+    }
+    args.push(processor_classpath.join(":"));
+    args
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args, jar_args, partition_sources,
-        reject_unknown_extensions, resolve_path, run_test_args, string_list,
+        TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args, jar_args, ksp_args,
+        ksp_output_dirs, partition_sources, reject_unknown_extensions, resolve_path, run_test_args,
+        string_list,
     };
 
     #[test]
@@ -582,6 +686,64 @@ mod tests {
                 "com.example.AppTest".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn ksp_invocation_runs_the_tool_against_the_processor_classpath() {
+        let args = ksp_args(
+            "/proj",
+            &["/proj/src/Main.kt".to_owned()],
+            &["/repos/one.jar".to_owned()],
+            &[
+                "/repos/ksp-toolchain.jar".to_owned(),
+                "/repos/processor.jar".to_owned(),
+            ],
+        );
+        assert_eq!(
+            args,
+            vec![
+                "-cp".to_owned(),
+                "/repos/ksp-toolchain.jar:/repos/processor.jar".to_owned(),
+                "com.google.devtools.ksp.cmdline.KSPJvmMain".to_owned(),
+                "-jvm-target".to_owned(),
+                "11".to_owned(),
+                "-module-name".to_owned(),
+                "main".to_owned(),
+                "-source-roots=/proj/src/Main.kt".to_owned(),
+                "-project-base-dir=/proj".to_owned(),
+                "-output-base-dir=/proj/build".to_owned(),
+                "-caches-dir=/proj/build/ksp-caches".to_owned(),
+                "-class-output-dir=/proj/build/ksp-classes".to_owned(),
+                "-kotlin-output-dir=/proj/build/generated/ksp/kotlin".to_owned(),
+                "-java-output-dir=/proj/build/generated/ksp/java".to_owned(),
+                "-resource-output-dir=/proj/build/ksp-resources".to_owned(),
+                "-language-version".to_owned(),
+                "2.0".to_owned(),
+                "-api-version".to_owned(),
+                "2.0".to_owned(),
+                "-libraries=/repos/one.jar".to_owned(),
+                "/repos/ksp-toolchain.jar:/repos/processor.jar".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn ksp_invocation_omits_libraries_when_the_compile_classpath_is_empty() {
+        let args = ksp_args(
+            "/proj",
+            &["/proj/src/Main.kt".to_owned()],
+            &[],
+            &["/repos/processor.jar".to_owned()],
+        );
+        assert!(!args.contains(&"-libraries=/repos/one.jar".to_owned()));
+        assert_eq!(args.last().unwrap(), "/repos/processor.jar");
+    }
+
+    #[test]
+    fn ksp_output_dirs_split_kotlin_and_java_generation() {
+        let (kotlin_out, java_out) = ksp_output_dirs("/proj");
+        assert_eq!(kotlin_out, "/proj/build/generated/ksp/kotlin");
+        assert_eq!(java_out, "/proj/build/generated/ksp/java");
     }
 
     #[test]

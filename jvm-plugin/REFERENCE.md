@@ -2,7 +2,10 @@
 
 The `ulite/jvm` plugin compiles the module's Java and Kotlin sources,
 packages the result into a jar, and optionally compiles and runs the
-module's tests. It is the plain-JVM slice of what `ARCHITECTURE.md §5.1`
+module's tests. A module that declares `ksp` dependencies gets the KSP2
+command-line tool run against its Kotlin sources before compilation, with
+the generated sources feeding the compile tasks (generate → compile →
+package). It is the plain-JVM slice of what `ARCHITECTURE.md §5.1`
 assigns to the `ulite/jvm` plugin; per-scope classpath semantics beyond
 compile/test are future milestones of the same plugin.
 
@@ -114,15 +117,46 @@ them but they are not part of the `jvm {}` block:
 |---|---|
 | `projectDir` | The project directory the build was started for. |
 | `classpath.compile` | Jar paths resolved from the module's `deps {}` block for the compile scope. |
+| `classpath.processor` | Jar paths resolved from the module's `ksp` declarations, headed by the KSP2 toolchain jar (`com.google.devtools.ksp:symbol-processing-aa`) whose `com.google.devtools.ksp.cmdline.KSPJvmMain` main class runs the tool. Present only when the module declares `ksp` deps. |
 | `classpath.testCompile` | Jar paths for compiling tests (when the test keys are set). |
 | `classpath.testRuntime` | Jar paths for running tests (when the test keys are set). |
+
+## KSP support
+
+A `ksp` declaration in the module's `deps {}` block routes the dependency
+into the `classpath.processor` bucket instead of the compile/runtime
+buckets. When that bucket is non-empty the plugin registers a `ksp` task
+and requires the module to have Kotlin sources (KSP has nothing to
+process otherwise, and the plugin rejects the configuration). The task
+runs the KSP2 command-line tool:
+
+```
+java -cp <classpath.processor> com.google.devtools.ksp.cmdline.KSPJvmMain \
+  -jvm-target 11 -module-name main -source-roots=<kotlin sources, ':'-joined> \
+  -project-base-dir <projectDir> -output-base-dir <projectDir>/build \
+  -caches-dir <projectDir>/build/ksp-caches -class-output-dir <projectDir>/build/ksp-classes \
+  -kotlin-output-dir <projectDir>/build/generated/ksp/kotlin \
+  -java-output-dir <projectDir>/build/generated/ksp/java \
+  -resource-output-dir <projectDir>/build/ksp-resources \
+  -language-version 2.0 -api-version 2.0 [-libraries <classpath.compile>] \
+  <classpath.processor>
+```
+
+The trailing processor classpath is how KSP discovers
+`ProcessorProvider` services. Generated Kotlin lands in
+`build/generated/ksp/kotlin`, which the `compile-kotlin` task adds to its
+source list, so the ordering is ksp → compile → package. Generated Java
+in `build/generated/ksp/java` is written but not compiled: `kotlinc`
+emits no classes for `.java` sources, and `javac` needs an explicit file
+list that a task's static inputs cannot enumerate after KSP has run.
 
 ## Registered tasks
 
 | Task | Tool | Action |
 |---|---|---|
-| `compile` | `javac` | `javac -d <classesDir> [-cp <classpath.compile, colon-separated>] <java sources>` (only when the module has `.java` sources) |
-| `compile-kotlin` | `kotlinc` | `kotlinc -d <classesDir> [-cp <classpath.compile:classesDir>] <kotlin sources>` (only when the module has `.kt` sources; waits for `compile` when both exist) |
+| `ksp` | `java` | Runs the KSP2 command-line tool over the Kotlin sources (only when the module has `ksp` deps; see above) |
+| `compile` | `javac` | `javac -d <classesDir> [-cp <classpath.compile, colon-separated>] <java sources>` (only when the module has `.java` sources; waits for `ksp` when present) |
+| `compile-kotlin` | `kotlinc` | `kotlinc -d <classesDir> [-cp <classpath.compile:classesDir>] <kotlin sources + generated/ksp/kotlin>` (only when the module has `.kt` sources; waits for `compile` when both source sets exist and for `ksp` when present) |
 | `assemble` | `jar` | `jar cf <jarFile> -C <classesDir> .` (after the present compile tasks) |
 | `generate-test-runner` | — | Writes `build/generated-test-src/ulite/TestRunner.java` (only with `testRunner = "junit-platform"`) |
 | `compile-tests` | `javac` | `javac -d <testClassesDir> -cp <classpath.testCompile:classesDir> <testSources>` — plus the generated runner source when `testRunner` is set (only when the test keys are set) |
@@ -132,8 +166,9 @@ Classpaths are joined with `:` (the separator of the unix hosts the
 toolchain targets). An empty main classpath omits `-cp` entirely.
 
 `compile`/`compile-kotlin` declare their source files as inputs and
-`classesDir` as output; `assemble` declares `classesDir` as input and
-the jar as output. `generate-test-runner` produces the generated source
+`classesDir` as output; `ksp` declares the Kotlin sources as inputs and
+the generated directories as outputs; `assemble` declares `classesDir` as
+input and the jar as output. `generate-test-runner` produces the generated source
 and carries no inputs — its fingerprint folds the runner text, so it
 regenerates exactly when the plugin's runner changes. `compile-tests`
 declares the test sources (and the generated source, when present) as

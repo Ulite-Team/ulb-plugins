@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["hello-plugin"]
+members = ["hello-plugin", "jvm-plugin"]
 
 [workspace.package]
 edition = "2024"

@@ -123,3 +123,88 @@ jobs:
       - name: Committed index.json is well-formed
         run: jq -e '.schema_version == 1 and (.plugins | type) == "object"' ulb-plugins/registry/index.json >/dev/null
 
+  jvm-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ulb-plugins
+
+      - name: Checkout Uliab (plugin sdk + uliab host)
+        uses: actions/checkout@v4
+        with:
+          repository: Ulite-Team/Uliab
+          path: Uliab
+          token: ${{ secrets.ULITE_PAT }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build jvm-plugin
+        working-directory: ulb-plugins
+        run: cargo build -p jvm-plugin --release --target wasm32-wasip2
+
+      - name: Build the uliab host
+        working-directory: Uliab
+        run: cargo build -p uliab
+
+      # A plain Java module built end to end: the driver resolves the plugin
+      # from a local index, configures it from the module's `jvm {}` block,
+      # and executes the javac/jar tasks. A second build from a different
+      # working directory must come back up-to-date and leave the jar intact,
+      # proving the block's relative paths resolved against the project dir.
+      - name: Build a Java module into a jar
+        working-directory: Uliab
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/jvm/src
+          cat > /tmp/jvm/src/App.java <<'JAVA'
+          public class App {
+              public static void main(String[] args) {
+                  System.out.println("hello from the jvm plugin");
+              }
+          }
+          JAVA
+          cat > /tmp/jvm/build.ulb <<'ULB'
+          jvm {
+            sources = ["src/App.java"]
+            classesDir = "build/classes"
+            jarFile = "build/app.jar"
+          }
+          ULB
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.1.0"\n}\n' > /tmp/jvm/libs.ulb
+          cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/jvm/jvm_plugin.wasm
+          cat > /tmp/jvm/index.json <<'JSON'
+          {
+            "schema_version": 1,
+            "plugins": {
+              "ulite/jvm": {
+                "versions": {
+                  "0.1.0": {
+                    "abi": { "min": "0.2", "max": "0.2" },
+                    "artifact_url": "jvm_plugin.wasm"
+                  }
+                }
+              }
+            }
+          }
+          JSON
+          cache="$(mktemp -d)"
+          build() {
+            cargo run -q -p uliab -- build --project /tmp/jvm \
+              --registry /tmp/jvm/index.json --cache-dir "$cache"
+          }
+          first="$(build)"
+          echo "$first"
+          grep -q '2 ran, 0 up-to-date' <<<"$first"
+          test -f /tmp/jvm/build/app.jar
+          jar tf /tmp/jvm/build/app.jar | grep -q 'App.class'
+          cd /
+          second="$(build)"
+          echo "$second"
+          grep -q '0 ran, 2 up-to-date' <<<"$second"
+
+

@@ -5,7 +5,7 @@ packages the result into a jar, and optionally compiles and runs the
 module's tests. A module that declares `ksp` dependencies gets the KSP2
 command-line tool run against its Kotlin sources before compilation, with
 the generated sources feeding the compile tasks (generate → compile →
-package). It is the plain-JVM slice of what `ARCHITECTURE.md §5.1`
+package). It is the plain-JVM slice of what `Uliab/docs/architecture.md §5.1`
 assigns to the `ulite/jvm` plugin; per-scope classpath semantics beyond
 compile/test are future milestones of the same plugin.
 

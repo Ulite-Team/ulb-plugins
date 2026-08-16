@@ -23,7 +23,7 @@
 //! was invoked from. Task inputs and outputs are the source files and the
 //! produced classes/jar, so the host's fingerprinting leaves a task alone
 //! until one of its inputs or dependencies changes. Consumed keys are
-//! documented in `REFERENCE.md` (ARCHITECTURE.md §5.1).
+//! documented in `docs/jvm-plugin.md` (Uliab/docs/architecture.md §5.1).
 
 mod bindings {
     #![allow(unsafe_code)]

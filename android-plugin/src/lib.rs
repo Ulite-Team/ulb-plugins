@@ -1,38 +1,63 @@
 //! The `ulite/android` plugin: compiles the module's Java sources against
-//! the Android platform jar for its declared `compileSdk`.
+//! the Android platform jar for its declared `compileSdk`, merges the
+//! module's resources with `aapt2`, dexes the classes with `d8`, and
+//! assembles the APK.
 //!
 //! The module's `android {}` block describes the sources, the class output
-//! directory, the SDK compile level, and optionally the SDK root to use.
-//! Unlike the plain-JVM plugins, this one cannot run without an Android
-//! SDK, and the SDK is not something a module ships with — so the root is
-//! expected from the host: `configure` receives `androidSdkDir`, which the
-//! host injects from its own `--android-sdk` flag or the usual environment
-//! conventions (`ANDROID_HOME`, `ANDROID_SDK_ROOT`, `~/Android/Sdk`). A
-//! per-module `sdkDir` key overrides that default when a module targets a
-//! different SDK than the rest of the build.
+//! directory, the SDK compile level, the manifest and resource directory,
+//! the minimum SDK, and the APK the module produces. Unlike the plain-JVM
+//! plugins, this one cannot run without an Android SDK, and the SDK is not
+//! something a module ships with — so the root is expected from the host:
+//! `configure` receives `androidSdkDir`, which the host injects from its
+//! own `--android-sdk` flag or the usual environment conventions
+//! (`ANDROID_HOME`, `ANDROID_SDK_ROOT`, `~/Android/Sdk`). A per-module
+//! `sdkDir` key overrides that default when a module targets a different
+//! SDK than the rest of the build.
 //!
-//! `configure` validates the block and performs the toolchain discovery a
-//! later release of this plugin will consume: the `android.jar` for the
-//! declared `compileSdk` must exist under `<sdk>/platforms/`, and a
-//! `build-tools` release carrying both `aapt2` and `d8` must be present
-//! (the highest such release is the one a future packaging task would
-//! use). Both checks fail at configure time so a broken SDK is reported
-//! before anything executes, not at a task boundary.
+//! `configure` validates the block and performs the toolchain discovery
+//! the tasks consume: the `android.jar` for the declared `compileSdk` must
+//! exist under `<sdk>/platforms/`, and a `build-tools` release carrying
+//! both `aapt2` and `lib/d8.jar` must be present (the highest such release
+//! is the one the packaging tasks invoke). Both checks fail at configure
+//! time so a broken SDK is reported before anything executes, not at a
+//! task boundary.
 //!
-//! The one task registered today is `compile`: `javac` emits the module's
-//! `.java` sources into `classesDir` against the platform jar, with the
-//! host-resolved compile classpath following it. Resource merging and dex
-//! packaging, the steps that actually invoke `aapt2` and `d8`, are the
-//! next slice of this plugin; the discovery done here is the part of that
-//! work a configure-time validation can pin down without running the
-//! tools. Paths written into the module block are resolved against the
-//! injected `projectDir`, so a build succeeds regardless of the directory
-//! the host was invoked from. Task inputs are the source files and the
-//! output the classes directory, so the host's fingerprinting leaves the
-//! task alone until a source changes; the platform jar is deliberately not
-//! an input (it is a large, externally-fixed artifact the build never
-//! modifies). Consumed keys are documented in `docs/android-plugin.md`
-//! (Uliab/docs/architecture.md §5.2).
+//! The registered tasks form the packaging chain (all run-tool, all paths
+//! absolute):
+//!
+//! - `prepareBuildDir` / `prepareDex` / `prepareApkDir` — `mkdir -p` the
+//!   derived output directories (`aapt2` and `d8` refuse to create their own
+//!   parents). The apk's parent is created by its own task because a module
+//!   may place the apk outside `<build>/android`.
+//! - `mergeResources` — `aapt2 compile --dir <resDir> -o <build>/res.zip`.
+//! - `linkResources` — `aapt2 link` the compiled resources with the
+//!   manifest into `<build>/resources.apk`, generating `R.java` under
+//!   `<build>/R`.
+//! - `prepareApk` — `cp <build>/resources.apk <apk>`, seeding the module's
+//!   apk with the linked resources before the dex is grafted on (`jar uf`
+//!   refuses a missing archive).
+//! - `compile` — `javac --release 17 -d <classesDir> -cp <android.jar>:...
+//!   -sourcepath <build>/R <sources> <build>/R/<namespace>/R.java`, with
+//!   the release pinned because d8 rejects class files newer than 17
+//!   regardless of the JDK the host runs. The `R.java` path is derived
+//!   from the module's `namespace`, which `linkResources` also hands aapt2
+//!   as `--custom-package` so the generated class lands at that path.
+//! - `jarClasses` — `jar cf <build>/classes.jar -C <classesDir> .`, since
+//!   d8 accepts archives but not directories as input.
+//! - `compileDex` — `java -cp <build-tools>/lib/d8.jar D8 --lib
+//!   <android.jar> --min-api <minSdk> --output <build>/dex
+//!   <build>/classes.jar`.
+//! - `packageApk` — `jar uf <apk> -C <build>/dex .`, grafting every
+//!   `classes*.dex` d8 emitted (a module that overflows one dex file yields
+//!   `classes2.dex`, `classes3.dex`, ...) onto the resources the
+//!   `prepareApk` copy placed in the apk.
+//!
+//! Task inputs are the source files and the resource directory, so the
+//! host's fingerprinting leaves a task alone until its own sources change;
+//! the platform jar is deliberately not an input (it is a large,
+//! externally-fixed artifact the build never modifies). Consumed keys are
+//! documented in `docs/android-plugin.md` (Uliab/docs/architecture.md
+//! §5.2).
 
 mod bindings {
     #![allow(unsafe_code)]
@@ -46,8 +71,9 @@ mod bindings {
     });
 
     use crate::{
-        android_jar, classpath_bucket, compile_args, highest_build_tools, int_value,
-        reject_unknown_extensions, resolve_path, resolve_sdk_root, string_list, string_value,
+        android_jar, classpath_bucket, compile_args, d8_args, highest_build_tools, int_value,
+        optional_int, package_args, reject_unknown_extensions, resolve_path, resolve_sdk_root,
+        rgen_java_path, string_list, string_value,
     };
     use exports::ulite::ulb::ulb_plugin::{Guest, PluginManifest};
     use serde_json::Value;
@@ -62,8 +88,15 @@ mod bindings {
                 name: "ulite/android".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 abi_version: ulb_plugin_sdk::ABI_VERSION.to_string(),
-                // Every run-tool task below uses this tool.
-                tools: vec!["javac".to_string()],
+                // The packaging tasks below invoke exactly these tools.
+                tools: vec![
+                    "javac".to_string(),
+                    "aapt2".to_string(),
+                    "jar".to_string(),
+                    "java".to_string(),
+                    "mkdir".to_string(),
+                    "cp".to_string(),
+                ],
             }
         }
 
@@ -79,37 +112,178 @@ mod bindings {
                 .ok_or_else(|| "module config has no 'android' block".to_owned())?;
 
             let compile_sdk = int_value(android, "compileSdk")?;
+            let min_sdk = int_value(android, "minSdk")?;
+            let target_sdk = optional_int(android, "targetSdk")?.unwrap_or(compile_sdk);
+            let namespace = string_value(android, "namespace")?;
             let sources = resolve_paths(project_dir, &string_list(android, "sources")?);
             if sources.is_empty() {
                 return Err("the 'android' block declares no sources".to_owned());
             }
             reject_unknown_extensions(&sources)?;
             let classes_dir = resolve_path(project_dir, &string_value(android, "classesDir")?);
+            let manifest = resolve_path(project_dir, &string_value(android, "manifest")?);
+            let res_dir = resolve_path(project_dir, &string_value(android, "resDir")?);
+            let apk = resolve_path(project_dir, &string_value(android, "apk")?);
 
             // Toolchain discovery doubles as validation: a module cannot
-            // compile without its platform jar, and a build-tools release
-            // lacking aapt2 or d8 cannot later package the module, so both
-            // must exist for configure to succeed.
+            // compile without its platform jar, and the build-tools release
+            // it would package with must carry aapt2 and the d8 jar, so a
+            // broken SDK is reported before anything executes.
             let sdk_root = resolve_sdk_root(&config, android, project_dir)?;
             let platform_jar = android_jar(&sdk_root, compile_sdk)?;
-            highest_build_tools(&sdk_root)?;
+            let build_tools = highest_build_tools(&sdk_root)?;
+            let d8_jar = build_tools.join("lib").join("d8.jar");
+            if !d8_jar.exists() {
+                return Err(format!(
+                    "no d8.jar under '{}'; expected it at '{}'",
+                    build_tools.display(),
+                    d8_jar.display()
+                ));
+            }
 
             // The platform jar heads the compile classpath so the module's
             // own sources can reference the SDK types.
             let mut classpath = vec![platform_jar.to_string_lossy().into_owned()];
             classpath.extend(classpath_bucket(&config, "compile"));
 
-            task_registrar::register_task(&Task {
-                name: "compile".to_owned(),
-                inputs: sources.clone(),
-                outputs: vec![classes_dir.clone()],
-                depends_on: Vec::new(),
-                action: Action::RunTool(RunToolArgs {
-                    tool: AllowlistedTool::Javac,
-                    args: compile_args(&classes_dir, &classpath, &sources),
-                    cwd: ".".to_owned(),
-                }),
+            // Derived build products live under <project>/build/android, all
+            // of them rewritten by the tools below; the apk the module
+            // declares is the only path that appears outside that tree.
+            let build_dir = std::path::Path::new(project_dir).join("build/android");
+            let res_zip = build_dir.join("res.zip");
+            let resources_apk = build_dir.join("resources.apk");
+            let rgen_dir = build_dir.join("R");
+            let rgen_java = rgen_java_path(&rgen_dir, &namespace);
+            let classes_jar = std::path::Path::new(project_dir).join("build/classes.jar");
+            let dex_dir = std::path::Path::new(project_dir).join("build/dex");
+            let apk_dir = std::path::Path::new(&apk).parent().ok_or_else(|| {
+                format!("the configured apk path '{apk}' has no parent directory")
             })?;
+
+            run_tool_task(
+                "prepareBuildDir",
+                vec![],
+                vec![],
+                vec![],
+                AllowlistedTool::Mkdir,
+                vec!["-p".to_owned(), build_dir.to_string_lossy().into_owned()],
+            )?;
+            run_tool_task(
+                "prepareApkDir",
+                vec![],
+                vec![],
+                vec![],
+                AllowlistedTool::Mkdir,
+                vec!["-p".to_owned(), apk_dir.to_string_lossy().into_owned()],
+            )?;
+            run_tool_task(
+                "mergeResources",
+                vec![res_dir.clone()],
+                vec![res_zip.to_string_lossy().into_owned()],
+                vec!["prepareBuildDir".to_owned()],
+                AllowlistedTool::Aapt2,
+                vec![
+                    build_tools.to_string_lossy().into_owned(),
+                    "compile".to_owned(),
+                    "--dir".to_owned(),
+                    res_dir,
+                    "-o".to_owned(),
+                    res_zip.to_string_lossy().into_owned(),
+                ],
+            )?;
+            run_tool_task(
+                "linkResources",
+                vec![res_zip.to_string_lossy().into_owned(), manifest.clone()],
+                vec![
+                    resources_apk.to_string_lossy().into_owned(),
+                    rgen_dir.to_string_lossy().into_owned(),
+                ],
+                vec!["prepareBuildDir".to_owned(), "mergeResources".to_owned()],
+                AllowlistedTool::Aapt2,
+                vec![
+                    build_tools.to_string_lossy().into_owned(),
+                    "link".to_owned(),
+                    "-o".to_owned(),
+                    resources_apk.to_string_lossy().into_owned(),
+                    "--manifest".to_owned(),
+                    manifest,
+                    "-I".to_owned(),
+                    platform_jar.to_string_lossy().into_owned(),
+                    "--java".to_owned(),
+                    rgen_dir.to_string_lossy().into_owned(),
+                    "--custom-package".to_owned(),
+                    namespace.clone(),
+                    "--min-sdk-version".to_owned(),
+                    min_sdk.to_string(),
+                    "--target-sdk-version".to_owned(),
+                    target_sdk.to_string(),
+                    res_zip.to_string_lossy().into_owned(),
+                ],
+            )?;
+            // The linked resources become the module's apk, then packageApk
+            // grafts the dex onto it; `jar uf` refuses a missing archive, so
+            // the copy must run first.
+            run_tool_task(
+                "prepareApk",
+                vec![resources_apk.to_string_lossy().into_owned()],
+                vec![apk.clone()],
+                vec!["linkResources".to_owned(), "prepareApkDir".to_owned()],
+                AllowlistedTool::Cp,
+                vec![resources_apk.to_string_lossy().into_owned(), apk.clone()],
+            )?;
+            run_tool_task(
+                "compile",
+                sources.clone(),
+                vec![classes_dir.clone()],
+                vec!["linkResources".to_owned()],
+                AllowlistedTool::Javac,
+                compile_args(&classes_dir, &classpath, &sources, &rgen_dir, &rgen_java),
+            )?;
+            run_tool_task(
+                "jarClasses",
+                vec![classes_dir.clone()],
+                vec![classes_jar.to_string_lossy().into_owned()],
+                vec!["compile".to_owned()],
+                AllowlistedTool::Jar,
+                vec![
+                    "cf".to_owned(),
+                    classes_jar.to_string_lossy().into_owned(),
+                    "-C".to_owned(),
+                    classes_dir,
+                    ".".to_owned(),
+                ],
+            )?;
+            run_tool_task(
+                "prepareDex",
+                vec![],
+                vec![],
+                vec![],
+                AllowlistedTool::Mkdir,
+                vec!["-p".to_owned(), dex_dir.to_string_lossy().into_owned()],
+            )?;
+            run_tool_task(
+                "compileDex",
+                vec![classes_jar.to_string_lossy().into_owned()],
+                vec![dex_dir.to_string_lossy().into_owned()],
+                vec!["jarClasses".to_owned(), "prepareDex".to_owned()],
+                AllowlistedTool::Java,
+                d8_args(&d8_jar, &platform_jar, min_sdk, &dex_dir, &classes_jar),
+            )?;
+            run_tool_task(
+                "packageApk",
+                vec![
+                    resources_apk.to_string_lossy().into_owned(),
+                    dex_dir.to_string_lossy().into_owned(),
+                ],
+                vec![apk.clone()],
+                vec![
+                    "linkResources".to_owned(),
+                    "prepareApk".to_owned(),
+                    "compileDex".to_owned(),
+                ],
+                AllowlistedTool::Jar,
+                package_args(std::path::Path::new(&apk), &dex_dir),
+            )?;
 
             Ok(())
         }
@@ -124,6 +298,28 @@ mod bindings {
             .iter()
             .map(|path| resolve_path(project_dir, path))
             .collect()
+    }
+
+    /// Registers one run-tool task of the packaging chain with the host.
+    fn run_tool_task(
+        name: &str,
+        inputs: Vec<String>,
+        outputs: Vec<String>,
+        depends_on: Vec<String>,
+        tool: AllowlistedTool,
+        args: Vec<String>,
+    ) -> Result<(), String> {
+        task_registrar::register_task(&Task {
+            name: name.to_owned(),
+            inputs,
+            outputs,
+            depends_on,
+            action: Action::RunTool(RunToolArgs {
+                tool,
+                args,
+                cwd: ".".to_owned(),
+            }),
+        })
     }
 
     // The export generates wasm component symbols (`export_name` with a
@@ -214,12 +410,11 @@ fn android_jar(sdk: &std::path::Path, compile_sdk: i64) -> Result<std::path::Pat
 }
 
 /// The highest `build-tools` release under the SDK that carries both
-/// `aapt2` and `d8`. A release counts only when both binaries are present,
+/// `aapt2` and `lib/d8.jar`. A release counts only when both are present,
 /// because a partially installed build-tools version would break packaging
 /// unpredictably; a directory whose name is not a numeric dotted version is
-/// skipped. This is the release a future packaging task of this plugin
-/// would invoke, discovered and validated here so an unusable SDK fails at
-/// configure time.
+/// skipped. The release is validated here so an unusable SDK fails at
+/// configure time, and returned so the packaging tasks know what to invoke.
 fn highest_build_tools(sdk: &std::path::Path) -> Result<std::path::PathBuf, String> {
     let build_tools = sdk.join("build-tools");
     let mut candidates: Vec<(Vec<u64>, std::path::PathBuf)> = Vec::new();
@@ -236,7 +431,7 @@ fn highest_build_tools(sdk: &std::path::Path) -> Result<std::path::PathBuf, Stri
         let Some(rank) = version_rank(&name) else {
             continue;
         };
-        if path.join("aapt2").exists() && path.join("d8").exists() {
+        if path.join("aapt2").exists() && path.join("lib").join("d8.jar").exists() {
             candidates.push((rank, path));
         }
     }
@@ -246,7 +441,7 @@ fn highest_build_tools(sdk: &std::path::Path) -> Result<std::path::PathBuf, Stri
         .map(|(_, path)| path)
         .ok_or_else(|| {
             format!(
-                "no build-tools release with aapt2 and d8 under '{}'",
+                "no build-tools release with aapt2 and lib/d8.jar under '{}'",
                 build_tools.display()
             )
         })
@@ -307,21 +502,103 @@ fn classpath_bucket(config: &serde_json::Value, bucket: &str) -> Vec<String> {
 
 /// The javac invocation for the compile task: emit classes to `-d`, feed
 /// the classpath (the platform jar headed by any resolved dependency jars)
-/// to `-cp`, then the sources. The classpath is never empty because the
-/// platform jar is always on it.
-fn compile_args(classes_dir: &str, classpath: &[String], sources: &[String]) -> Vec<String> {
-    let mut args = vec!["-d".to_owned(), classes_dir.to_owned()];
+/// to `-cp`, then the sources followed by the `R.java` aapt2 generated for
+/// the module's `namespace` under `rgen_dir`. The `R` directory is on
+/// `-sourcepath` so javac can also resolve the per-resource-type `R$*.java`
+/// files older aapt2 releases emit alongside `R.java`.
+///
+/// The `--release` is pinned to 17: d8 rejects class files newer than its
+/// supported range, and pinning keeps the output identical regardless of
+/// the JDK the host happens to run.
+fn compile_args(
+    classes_dir: &str,
+    classpath: &[String],
+    sources: &[String],
+    rgen_dir: &std::path::Path,
+    rgen_java: &std::path::Path,
+) -> Vec<String> {
+    let mut args = vec![
+        "--release".to_owned(),
+        "17".to_owned(),
+        "-d".to_owned(),
+        classes_dir.to_owned(),
+    ];
     args.extend(["-cp".to_owned(), classpath.join(":")]);
+    args.extend([
+        "-sourcepath".to_owned(),
+        rgen_dir.to_string_lossy().into_owned(),
+    ]);
     args.extend(sources.iter().cloned());
+    args.push(rgen_java.to_string_lossy().into_owned());
     args
+}
+
+/// The `R.java` aapt2 emits for `namespace` under `rgen_dir`: the dot
+/// segments of the namespace become the directory path, matching the
+/// package aapt2 writes the class under when `link` is given the module's
+/// `--custom-package`.
+fn rgen_java_path(rgen_dir: &std::path::Path, namespace: &str) -> std::path::PathBuf {
+    rgen_dir.join(namespace.replace('.', "/")).join("R.java")
+}
+
+/// The `java` invocation that runs d8: `-cp <build-tools>/lib/d8.jar`,
+/// then the `D8` main class with the platform jar as `--lib`, the module's
+/// `minSdk` as `--min-api`, and the class jar as the only input (d8
+/// accepts archives, not directories).
+fn d8_args(
+    d8_jar: &std::path::Path,
+    platform_jar: &std::path::Path,
+    min_sdk: i64,
+    dex_dir: &std::path::Path,
+    classes_jar: &std::path::Path,
+) -> Vec<String> {
+    vec![
+        "-cp".to_owned(),
+        d8_jar.to_string_lossy().into_owned(),
+        "com.android.tools.r8.D8".to_owned(),
+        "--lib".to_owned(),
+        platform_jar.to_string_lossy().into_owned(),
+        "--min-api".to_owned(),
+        min_sdk.to_string(),
+        "--output".to_owned(),
+        dex_dir.to_string_lossy().into_owned(),
+        classes_jar.to_string_lossy().into_owned(),
+    ]
+}
+
+/// Reads an optional integer key of the module block: `Ok(None)` when the
+/// key is absent, `Ok(Some(n))` when it holds a number, and an error when a
+/// supplied value is not a number — `targetSdk = "36"` must fail configure
+/// rather than silently fall back to `compileSdk`.
+fn optional_int(android: &serde_json::Value, key: &str) -> Result<Option<i64>, String> {
+    match android.get(key) {
+        None => Ok(None),
+        Some(value) => value.as_i64().map(Some).ok_or_else(|| {
+            format!("the 'android' block key '{key}' must be an integer, found {value}")
+        }),
+    }
+}
+
+/// The `jar` invocation that grafts the dex onto the seeded apk: everything
+/// under the d8 output directory, so a module that overflows a single dex
+/// file (d8 then emits `classes.dex`, `classes2.dex`, ...) gets every
+/// emitted dex packaged rather than only the first.
+fn package_args(apk: &std::path::Path, dex_dir: &std::path::Path) -> Vec<String> {
+    vec![
+        "uf".to_owned(),
+        apk.to_string_lossy().into_owned(),
+        "-C".to_owned(),
+        dex_dir.to_string_lossy().into_owned(),
+        ".".to_owned(),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        android_jar, classpath_bucket, compile_args, highest_build_tools, int_value,
-        reject_unknown_extensions, resolve_path, resolve_sdk_root, string_list, string_value,
-        version_rank,
+        android_jar, classpath_bucket, compile_args, d8_args, highest_build_tools, int_value,
+        optional_int, package_args, reject_unknown_extensions, resolve_path, resolve_sdk_root,
+        rgen_java_path, string_list, string_value, version_rank,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -345,12 +622,14 @@ mod tests {
             let tools = dir.join("build-tools").join(version);
             std::fs::create_dir_all(&tools).expect("fake build-tools");
             std::fs::write(tools.join("aapt2"), b"").expect("fake aapt2");
-            std::fs::write(tools.join("d8"), b"").expect("fake d8");
+            std::fs::create_dir_all(tools.join("lib")).expect("fake lib");
+            std::fs::write(tools.join("lib").join("d8.jar"), b"").expect("fake d8.jar");
         }
     }
 
     #[test]
-    fn compiler_invocation_heads_the_classpath_with_the_platform_jar() {
+    fn compiler_invocation_pins_release_and_heads_the_classpath_with_the_platform_jar() {
+        let rgen = std::path::Path::new("/proj/build/android/R");
         let args = compile_args(
             "/proj/build/classes",
             &[
@@ -358,34 +637,86 @@ mod tests {
                 "/repos/one.jar".to_owned(),
             ],
             &["/proj/src/Main.java".to_owned()],
+            rgen,
+            &rgen_java_path(rgen, "com.example.ulite"),
         );
         assert_eq!(
             args,
             vec![
+                "--release".to_owned(),
+                "17".to_owned(),
                 "-d".to_owned(),
                 "/proj/build/classes".to_owned(),
                 "-cp".to_owned(),
                 "/sdk/platforms/android-36/android.jar:/repos/one.jar".to_owned(),
+                "-sourcepath".to_owned(),
+                "/proj/build/android/R".to_owned(),
                 "/proj/src/Main.java".to_owned(),
+                "/proj/build/android/R/com/example/ulite/R.java".to_owned(),
             ]
         );
     }
 
     #[test]
     fn compiler_invocation_keeps_cp_for_a_dep_free_module() {
+        let rgen = std::path::Path::new("/proj/build/android/R");
         let args = compile_args(
             "/proj/build/classes",
             &["/sdk/platforms/android-36/android.jar".to_owned()],
             &["/proj/src/Main.java".to_owned()],
+            rgen,
+            &rgen_java_path(rgen, "com.example.ulite"),
         );
         assert_eq!(
             args,
             vec![
+                "--release".to_owned(),
+                "17".to_owned(),
                 "-d".to_owned(),
                 "/proj/build/classes".to_owned(),
                 "-cp".to_owned(),
                 "/sdk/platforms/android-36/android.jar".to_owned(),
+                "-sourcepath".to_owned(),
+                "/proj/build/android/R".to_owned(),
                 "/proj/src/Main.java".to_owned(),
+                "/proj/build/android/R/com/example/ulite/R.java".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rgen_java_path_maps_namespace_dots_to_directories() {
+        assert_eq!(
+            rgen_java_path(
+                std::path::Path::new("/proj/build/android/R"),
+                "com.example.ulite"
+            ),
+            std::path::PathBuf::from("/proj/build/android/R/com/example/ulite/R.java")
+        );
+    }
+
+    #[test]
+    fn d8_invocation_runs_the_jar_through_the_d8_main_class() {
+        let args = d8_args(
+            std::path::Path::new("/sdk/build-tools/36.0.0/lib/d8.jar"),
+            std::path::Path::new("/sdk/platforms/android-36/android.jar"),
+            21,
+            std::path::Path::new("/proj/build/dex"),
+            std::path::Path::new("/proj/build/classes.jar"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "-cp".to_owned(),
+                "/sdk/build-tools/36.0.0/lib/d8.jar".to_owned(),
+                "com.android.tools.r8.D8".to_owned(),
+                "--lib".to_owned(),
+                "/sdk/platforms/android-36/android.jar".to_owned(),
+                "--min-api".to_owned(),
+                "21".to_owned(),
+                "--output".to_owned(),
+                "/proj/build/dex".to_owned(),
+                "/proj/build/classes.jar".to_owned(),
             ]
         );
     }
@@ -464,7 +795,34 @@ mod tests {
         std::fs::write(sdk.join("build-tools").join("35.0.0").join("aapt2"), b"")
             .expect("only aapt2");
         let error = highest_build_tools(&sdk).expect_err("no complete release");
-        assert!(error.contains("aapt2 and d8"), "{error}");
+        assert!(error.contains("aapt2 and lib/d8.jar"), "{error}");
+    }
+
+    #[test]
+    fn optional_int_reads_present_absent_and_invalid() {
+        let block = json!({ "minSdk": 21, "targetSdk": "36" });
+        assert_eq!(optional_int(&block, "minSdk"), Ok(Some(21)));
+        assert_eq!(optional_int(&block, "compileSdk"), Ok(None));
+        let error = optional_int(&block, "targetSdk").expect_err("non-number");
+        assert!(error.contains("targetSdk"), "{error}");
+    }
+
+    #[test]
+    fn package_invocation_grafts_every_dex_file_onto_the_apk() {
+        let args = package_args(
+            std::path::Path::new("/proj/build/app-debug.apk"),
+            std::path::Path::new("/proj/build/dex"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "uf".to_owned(),
+                "/proj/build/app-debug.apk".to_owned(),
+                "-C".to_owned(),
+                "/proj/build/dex".to_owned(),
+                ".".to_owned(),
+            ]
+        );
     }
 
     #[test]

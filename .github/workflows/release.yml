@@ -37,6 +37,7 @@ jobs:
         run: |
           cargo build -p hello-plugin --release --target wasm32-wasip2
           cargo build -p jvm-plugin --release --target wasm32-wasip2
+          cargo build -p android-plugin --release --target wasm32-wasip2
 
       - name: Publish release assets
         working-directory: ulb-plugins
@@ -57,3 +58,4 @@ jobs:
           }
           publish hello-plugin-v0.4.0 hello_plugin.wasm
           publish jvm-plugin-v0.5.0 jvm_plugin.wasm
+          publish android-plugin-v0.1.0 android_plugin.wasm

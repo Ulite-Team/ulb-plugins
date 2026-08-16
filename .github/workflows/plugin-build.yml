@@ -644,3 +644,101 @@ jobs:
           grep -q '3 ran, 0 up-to-date' <<<"$(build)"
           output="$(java -cp "/tmp/ksp-app/build/app.jar:$runtime" app.MainKt)"
           grep -q 'second run' <<<"$output"
+
+  android-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ulb-plugins
+
+      - name: Checkout Uliab (plugin sdk + uliab host)
+        uses: actions/checkout@v4
+        with:
+          repository: Ulite-Team/Uliab
+          path: Uliab
+          token: ${{ secrets.ULITE_PAT }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build android-plugin
+        working-directory: ulb-plugins
+        run: cargo build -p android-plugin --release --target wasm32-wasip2
+
+      - name: Build the uliab host
+        working-directory: Uliab
+        run: cargo build -p uliab
+
+      # A hermetic fake SDK proves the wiring without downloading a real
+      # one: a valid empty zip as android.jar and empty aapt2/d8 markers in
+      # two build-tools releases. Discovery must pick the highest complete
+      # release (36.0.0 over 35.0.0) and the compile task must run javac
+      # against the platform jar; the source avoids android.* imports
+      # precisely because the platform jar is empty. A second build from a
+      # different working directory must come back up-to-date, proving the
+      # block's relative paths resolved against the injected projectDir.
+      - name: Build a Java module against a fake Android SDK
+        working-directory: Uliab
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/emptyjar /tmp/fake-sdk/platforms/android-36 \
+            /tmp/fake-sdk/build-tools/35.0.0 /tmp/fake-sdk/build-tools/36.0.0
+          jar c0Mf /tmp/fake-sdk/platforms/android-36/android.jar -C /tmp/emptyjar .
+          touch /tmp/fake-sdk/build-tools/35.0.0/aapt2 /tmp/fake-sdk/build-tools/35.0.0/d8
+          touch /tmp/fake-sdk/build-tools/36.0.0/aapt2 /tmp/fake-sdk/build-tools/36.0.0/d8
+          mkdir -p /tmp/android/src
+          cat > /tmp/android/src/Main.java <<'JAVA'
+          public class Main {
+              public static String hello() {
+                  return "hello from the android plugin";
+              }
+          }
+          JAVA
+          cat > /tmp/android/build.ulb <<'ULB'
+          android {
+            compileSdk = 36
+            sources = ["src/Main.java"]
+            classesDir = "build/classes"
+          }
+          ULB
+          printf 'plugins {\n  android = "ulite/android" @ "0.1.0"\n}\n' > /tmp/android/libs.ulb
+          cp ../ulb-plugins/target/wasm32-wasip2/release/android_plugin.wasm /tmp/android/android_plugin.wasm
+          cat > /tmp/android/index.json <<'JSON'
+          {
+            "schema_version": 1,
+            "plugins": {
+              "ulite/android": {
+                "versions": {
+                  "0.1.0": {
+                    "abi": { "min": "0.4", "max": "0.4" },
+                    "artifact_url": "android_plugin.wasm"
+                  }
+                }
+              }
+            }
+          }
+          JSON
+          cache="$(mktemp -d)"
+          uliab="$(pwd)/target/debug/uliab"
+          build() {
+            "$uliab" build --project /tmp/android \
+              --registry /tmp/android/index.json --cache-dir "$cache" --android-sdk /tmp/fake-sdk
+          }
+          first="$(build)"
+          echo "$first"
+          grep -q '1 ran, 0 up-to-date' <<<"$first"
+          test -f /tmp/android/build/classes/Main.class
+          cd /
+          grep -q '0 ran, 1 up-to-date' <<<"$(build)"
+          # A compile level the SDK does not have must fail configure, not
+          # javac, proving discovery ran inside the plugin.
+          sed -i 's/compileSdk = 36/compileSdk = 99/' /tmp/android/build.ulb
+          if build > /tmp/android/err.log 2>&1; then
+            echo "a missing platform jar did not fail the build"
+            exit 1
+          fi
+          grep -q 'no android.jar for compileSdk 99' /tmp/android/err.log

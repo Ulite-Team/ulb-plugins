@@ -118,6 +118,22 @@ packages the jar (`3 ran, 0 up-to-date`). Asserts the generated source and
 class exist, then runs the produced jar on the resolved runtime classpath
 and checks its stdout — including after a source change forces a rebuild.
 
+### `kmp-build` — the kmp plugin's jvm target
+
+Builds a multiplatform module whose `commonMain` Kotlin imports a
+source-set dependency (resolved from a local `file://` Maven layout) and
+whose `jvmMain` mixes Java and Kotlin: `3 ran, 0 up-to-date` (compile,
+compile-kotlin, assemble), the jar holds both source sets' classes, and
+the packaged main prints the shared dep's value at runtime. Also asserts
+`deps resolve` prints `kmp.commonMain:`/`kmp.jvmMain:` sections, that a
+module-level `deps {}` block does **not** satisfy a source-set import (the
+plugin reads only the host's `classpathSourceSets`), and that an
+unsupported source set (`androidMain`) fails configure with a named error.
+
+Like the other jobs, `kmp-build` checks out Uliab from `main`, and it
+needs the host's per-source-set `deps {}` resolution — merge the Uliab PR
+carrying that slice before this job is expected to go green.
+
 ## What the jobs are not
 
 - Not unit tests — the host's `build_driver`/`deps_resolve` integration

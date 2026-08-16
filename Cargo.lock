@@ -99,6 +99,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kmp-plugin"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "ulb-plugin-sdk",
+ "wit-bindgen",
+]
+
+[[package]]
 name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

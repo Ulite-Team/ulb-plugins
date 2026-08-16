@@ -647,6 +647,172 @@ jobs:
           output="$(java -cp "/tmp/ksp-app/build/app.jar:$runtime" app.MainKt)"
           grep -q 'second run' <<<"$output"
 
+  kmp-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ulb-plugins
+
+      - name: Checkout Uliab (plugin sdk + uliab host)
+        uses: actions/checkout@v4
+        with:
+          repository: Ulite-Team/Uliab
+          path: Uliab
+          token: ${{ secrets.ULITE_PAT }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build kmp-plugin
+        working-directory: ulb-plugins
+        run: cargo build -p kmp-plugin --release --target wasm32-wasip2
+
+      - name: Build the uliab host
+        working-directory: Uliab
+        run: cargo build -p uliab
+
+      - name: Install kotlinc
+        run: |
+          curl -sSLo /tmp/kotlin.zip https://github.com/JetBrains/kotlin/releases/download/v2.2.0/kotlin-compiler-2.2.0.zip
+          unzip -q /tmp/kotlin.zip -d /opt
+          echo "/opt/kotlinc/bin" >> "$GITHUB_PATH"
+
+      # The jvm target of a kmp module, built end to end against a real
+      # kotlinc: commonMain's kotlin compiles against the shared source
+      # set's own dep (resolved from a local maven repo), jvmMain's java
+      # and kotlin compile after it, and assemble packs both source sets.
+      # Running the packaged main proves the commonMain dep reached the
+      # classpath at runtime too. Because the plugin consumes the host's
+      # per-source-set classpaths (`classpathSourceSets`), a module-level
+      # `deps {}` block must NOT satisfy a source-set import — the host
+      # checks out Uliab `main`, which carries per-source-set resolution.
+      - name: Build a kmp module's jvm target into a jar
+        working-directory: Uliab
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/kmp-m2/com/example/lib/1.0 /tmp/kmp-libjar/com/example/lib
+          cat > /tmp/kmp-m2/com/example/lib/1.0/lib-1.0.pom <<'POM'
+          <?xml version="1.0"?><project><modelVersion>4.0.0</modelVersion><groupId>com.example</groupId><artifactId>lib</artifactId><version>1.0</version></project>
+          POM
+          printf 'package com.example.lib;\npublic class Lib { public static String message() { return "from the shared dep"; } }\n' > /tmp/kmp-libjar/com/example/lib/Lib.java
+          javac -d /tmp/kmp-libjar /tmp/kmp-libjar/com/example/lib/Lib.java
+          (cd /tmp/kmp-libjar && jar cf /tmp/kmp-m2/com/example/lib/1.0/lib-1.0.jar com/example/lib/Lib.class)
+          mkdir -p /tmp/kmp/src/commonMain /tmp/kmp/src/jvmMain
+          cat > /tmp/kmp/src/commonMain/Shared.kt <<'KOTLIN'
+          package shared
+          fun greet(): String = com.example.lib.Lib.message()
+          KOTLIN
+          cat > /tmp/kmp/src/jvmMain/Helper.java <<'JAVA'
+          package app;
+          public class Helper {
+              public static String decorate(String s) { return "[" + s + "]"; }
+          }
+          JAVA
+          cat > /tmp/kmp/src/jvmMain/Main.kt <<'KOTLIN'
+          package app
+          fun main() { println(Helper.decorate(shared.greet())) }
+          KOTLIN
+          cat > /tmp/kmp/build.ulb <<'ULB'
+          kmp {
+            commonMain {
+              sources = ["src/commonMain/Shared.kt"]
+              deps { implementation "com.example:lib:1.0" }
+            }
+            jvmMain {
+              sources = ["src/jvmMain/Helper.java", "src/jvmMain/Main.kt"]
+            }
+            jvm {
+              classesDir = "build/classes"
+              jarFile = "build/app.jar"
+            }
+          }
+          ULB
+          printf 'plugins {\n  kmp = "ulite/kmp" @ "0.1.0"\n}\n' > /tmp/kmp/libs.ulb
+          cp ../ulb-plugins/target/wasm32-wasip2/release/kmp_plugin.wasm /tmp/kmp/kmp_plugin.wasm
+          cat > /tmp/kmp/index.json <<'JSON'
+          {
+            "schema_version": 1,
+            "plugins": {
+              "ulite/kmp": {
+                "versions": {
+                  "0.1.0": {
+                    "abi": { "min": "0.5", "max": "0.5" },
+                    "artifact_url": "kmp_plugin.wasm"
+                  }
+                }
+              }
+            }
+          }
+          JSON
+          cache="$(mktemp -d)"
+          uliab="$(pwd)/target/debug/uliab"
+          build() {
+            "$uliab" build --project /tmp/kmp \
+              --registry /tmp/kmp/index.json --cache-dir "$cache" --repo /tmp/kmp-m2
+          }
+          first="$(build)"
+          echo "$first"
+          grep -q '3 ran, 0 up-to-date' <<<"$first"
+          jar tf /tmp/kmp/build/app.jar | grep -q 'shared/SharedKt.class'
+          jar tf /tmp/kmp/build/app.jar | grep -q 'app/Helper.class'
+          jar tf /tmp/kmp/build/app.jar | grep -q 'app/MainKt.class'
+          output="$(java -cp "/tmp/kmp/build/app.jar:/tmp/kmp-m2/com/example/lib/1.0/lib-1.0.jar:/opt/kotlinc/lib/kotlin-stdlib.jar" app.MainKt)"
+          test "$output" = "[from the shared dep]"
+          # The host resolves each source set's deps independently.
+          resolved="$("$uliab" deps resolve --project /tmp/kmp --cache-dir "$cache" --repo /tmp/kmp-m2)"
+          echo "$resolved"
+          grep -q '^kmp.commonMain:' <<<"$resolved"
+          # An unchanged build from another working directory is fully
+          # up-to-date: derived paths resolve against the injected projectDir.
+          cd /
+          grep -q '0 ran, 3 up-to-date' <<<"$(build)"
+          cd /tmp/kmp
+          # A module-level dep must not satisfy a source-set import: the
+          # plugin reads `classpathSourceSets`, not the module's own deps.
+          cat > /tmp/kmp/build.ulb <<'ULB'
+          deps {
+            implementation "com.example:lib:1.0"
+          }
+          kmp {
+            commonMain {
+              sources = ["src/commonMain/Shared.kt"]
+            }
+            jvmMain {
+              sources = ["src/jvmMain/Helper.java", "src/jvmMain/Main.kt"]
+            }
+            jvm {
+              classesDir = "build/classes"
+              jarFile = "build/app.jar"
+            }
+          }
+          ULB
+          if build > /tmp/kmp/toplevel.log 2>&1; then
+            echo "a module-level dep satisfied a source-set import"
+            exit 1
+          fi
+          grep -q 'unresolved reference' /tmp/kmp/toplevel.log
+          # An unsupported source set fails configure with a named error.
+          cat > /tmp/kmp/build.ulb <<'ULB'
+          kmp {
+            androidMain {
+              sources = ["src/jvmMain/Helper.java"]
+            }
+            jvm {
+              classesDir = "build/classes"
+              jarFile = "build/app.jar"
+            }
+          }
+          ULB
+          if build > /tmp/kmp/androidset.log 2>&1; then
+            echo "an unsupported source set did not fail the build"
+            exit 1
+          fi
+          grep -q "the 'androidMain' source set is not compiled by the jvm target" /tmp/kmp/androidset.log
+
   android-build:
     runs-on: ubuntu-latest
     steps:

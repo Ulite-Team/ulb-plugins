@@ -1,7 +1,8 @@
 # CI (`plugin-build.yml`)
 
-A single workflow, `plugin-build`, with six jobs on `push: [main]` and
-`workflow_dispatch`. Every job builds real `wasm32-wasip2` components and
+A single workflow, `plugin-build`, with seven jobs on `push: [main]`,
+`pull_request` (against `main`), and `workflow_dispatch`. Every job builds
+real `wasm32-wasip2` components and
 runs them under the real `uliab` host — there are no mocks anywhere.
 
 ## Common setup
@@ -62,6 +63,29 @@ asserts: `slf4j-api` reaches the compile bucket, `junit` does **not**,
 - a broken assertion fails the build;
 - **removing the `implementation` dep fails main compilation**, proving
   `testImplementation` jars never leak onto the main compile classpath.
+
+### `android-build` — the SDK capability end to end
+
+Builds a Java module against a **hermetic fake SDK**: a valid empty zip
+as `android.jar`, empty `aapt2`/`d8` markers in two `build-tools`
+releases, no real SDK download. This proves the whole SDK capability
+chain without network or gigabytes:
+
+- the host's `--android-sdk` resolves the root and preopens it into the
+  plugin's filesystem;
+- `configure` discovers `android-36/android.jar` and picks the highest
+  complete `build-tools` release (36.0.0 over 35.0.0);
+- the `compile` task runs real `javac` against the platform jar
+  (`1 ran, 0 up-to-date`, `Main.class` produced), and a second build from
+  a different working directory is `0 ran, 1 up-to-date`;
+- a `compileSdk` the SDK does not have fails at configure time with
+  `no android.jar for compileSdk 99`, proving discovery ran inside the
+  plugin rather than javac failing opaquely.
+
+Like every job here, `android-build` checks out Uliab from `main`, so on
+this repo's own PRs it only goes green once the Uliab host changes it
+exercises (`--android-sdk`, `androidSdkDir` injection, the read-only
+preopen) have landed on Uliab `main` — merge Uliab's SDK PR first.
 
 ### `jvm-runner-discovery` — the generated JUnit Platform runner
 

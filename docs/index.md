@@ -1,8 +1,8 @@
 # ulb-plugins — Documentation
 
 This repository holds the official WASM plugins for the `ulb` build tool
-(`ulite/hello`, `ulite/jvm`), the plugin registry index, and the build
-pipeline that exercises the whole system end to end.
+(`ulite/hello`, `ulite/jvm`, `ulite/android`), the plugin registry index,
+and the build pipeline that exercises the whole system end to end.
 
 ## Documents
 
@@ -11,6 +11,7 @@ pipeline that exercises the whole system end to end.
 | [architecture.md](architecture.md) | The workspace: what each plugin owns, how plugins are built and published, and how the pieces interact |
 | [hello-plugin.md](hello-plugin.md) | `ulite/hello` — the minimal plugin that establishes the build path every later plugin follows |
 | [jvm-plugin.md](jvm-plugin.md) | `ulite/jvm` — the reference plugin: module block, classpath buckets, tasks, KSP support (moved from `jvm-plugin/REFERENCE.md`) |
+| [android-plugin.md](android-plugin.md) | `ulite/android` — SDK discovery and the compile task against the platform jar |
 | [registry.md](registry.md) | The `registry/index.json` format and how artifacts are published |
 | [ci.md](ci.md) | The `plugin-build` workflow and what each job actually proves |
 | [ksp-fixture.md](ksp-fixture.md) | The `fixtures/ksp-hello` processor fixture and the offline Maven layout it installs into |

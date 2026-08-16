@@ -2,12 +2,13 @@
 
 ## Workspace
 
-A Cargo workspace (`resolver = "2"`, edition 2024) with two members:
+A Cargo workspace (`resolver = "2"`, edition 2024) with three members:
 
 | Crate | Plugin | Job |
 |---|---|---|
 | `hello-plugin` (0.4.0) | `ulite/hello` | Minimal world implementation; establishes the build/test path |
 | `jvm-plugin` (0.5.0) | `ulite/jvm` | Compile Java/Kotlin, package a jar, run tests, run KSP2 |
+| `android-plugin` (0.1.0) | `ulite/android` | Discover the Android SDK toolchain; compile against the platform jar |
 
 Both are `cdylib` crates, depend on `ulb-plugin-sdk` by path
 (`../../Uliab/crates/ulb-plugin-sdk`), and share the workspace's
@@ -22,12 +23,28 @@ toolchain knowledge is a plugin concern:
 
 - `ulite/jvm` knows `javac`, `kotlinc`, `jar`, `java`, and the KSP2 tool
   invocation — nothing in the core does.
-- `ulite/android`, `ulite/kmp` are the roadmap; they will follow the same
-  shape: a `configure` that validates a module block and registers tasks.
+- `ulite/android` knows where an SDK keeps its platform jar and
+  build-tools, and how to compile against them — nothing in the core does
+  (the host only hands it the SDK root and read-only access to it, see
+  below).
+- `ulite/kmp` is the roadmap; it will follow the same shape: a `configure`
+  that validates a module block and registers tasks.
 
 Per the core architecture (`Uliab/docs/architecture.md` §5.1), the
 `jvm` plugin family owns classpath scoping beyond compile/test as future
-milestones of the same plugin.
+milestones of the same plugin; `ulite/android`'s variant matrix, resource
+merging, and packaging are future milestones of its own.
+
+## The SDK capability
+
+A wasm plugin has no ambient filesystem, so `ulite/android` cannot locate
+an Android SDK by itself. The host resolves the root (its `--android-sdk`
+flag, or `ANDROID_HOME`/`ANDROID_SDK_ROOT`/`~/Android/Sdk`), injects it as
+the `androidSdkDir` configuration key, and **preopens the directory
+read-only into the plugin's WASI filesystem at its real path**
+(`Uliab/docs/architecture.md` §3.2). That capability is what lets
+`configure` discover the platform jar and build-tools inside the SDK; the
+guest filesystem is otherwise empty.
 
 ## The plugin lifecycle
 

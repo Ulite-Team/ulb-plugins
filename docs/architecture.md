@@ -63,8 +63,9 @@ wit_bindgen::generate!({
 
 The path is relative to the crate source, which is why the repository
 layout (Uliab adjacent to ulb-plugins) is not cosmetic: it must hold both
-for cargo's `path =` dependency and for this `path:` literal:argument (the host side follows the same WIT contract).
-literal:
+for cargo's `path =` dependency and for this `path:` argument. The core
+repo's documentation enforces the same rule for the host side (its
+`bindgen!` uses the same WIT text).
 
 ## Failure semantics
 

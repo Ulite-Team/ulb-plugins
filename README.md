@@ -57,8 +57,8 @@ cargo fmt --check
 cargo test
 ```
 
-literal:Per the Definition of Done, a plugin change is not done until the wasm component
-builds and loads and runs under the real host (`uliab run`).
+A plugin change is not done until the wasm component builds, loads, and
+runs under the real host (`uliab run`).
 
 ## Documentation
 

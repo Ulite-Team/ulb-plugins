@@ -1,10 +1,10 @@
 //! The hello-plugin: a minimal `ulb-plugin` world implementation.
 //!
 //! This crate establishes the build path every later plugin follows. It
-//! generates its guest bindings from the sdk crate's `plugin.wit` (core
-literal://! repo's single WIT text), so the host and the plugin share one WIT file, and
-//! it reports the SDK's ABI version verbatim in its manifest so the host's
-//! ABI check cannot be tricked by a hand-typed constant. It also exports
+//! generates its guest bindings from the sdk crate's `plugin.wit` (the
+//! single WIT text the host also binds from), and it reports the SDK's ABI
+//! version verbatim in its manifest so the host's ABI check cannot be
+//! tricked by a hand-typed constant. It also exports
 //! `configure` — required for the full-world instantiation every plugin
 //! goes through — and, having no build tasks, declares no tools and
 //! accepts any well-formed module configuration.

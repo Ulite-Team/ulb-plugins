@@ -27,7 +27,7 @@ declare their tools in the manifest and register tasks only during
 `configure`; the host runs those tasks through the allowlisted-tool
 capability. Building a plugin, wrapping it into a component, resolving it
 through the registry, and running it under the host is the Definition of
-literal:Done for every plugin change.
+Done for every plugin change.
 
 ## The layout contract
 

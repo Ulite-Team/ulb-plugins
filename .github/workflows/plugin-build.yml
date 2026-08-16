@@ -96,7 +96,7 @@ jobs:
               "ulite/hello": {
                 "versions": {
                   "0.4.0": {
-                    "abi": { "min": "0.4", "max": "0.4" },
+                    "abi": { "min": "0.4", "max": "0.5" },
                     "artifact_url": "hello_plugin.wasm"
                   }
                 }
@@ -207,7 +207,7 @@ jobs:
               "ulite/jvm": {
                 "versions": {
                   "0.5.0": {
-                    "abi": { "min": "0.4", "max": "0.4" },
+                    "abi": { "min": "0.4", "max": "0.5" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
                 }
@@ -266,7 +266,7 @@ jobs:
               "ulite/jvm": {
                 "versions": {
                   "0.5.0": {
-                    "abi": { "min": "0.4", "max": "0.4" },
+                    "abi": { "min": "0.4", "max": "0.5" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
                 }
@@ -365,7 +365,7 @@ jobs:
               "ulite/jvm": {
                 "versions": {
                   "0.5.0": {
-                    "abi": { "min": "0.4", "max": "0.4" },
+                    "abi": { "min": "0.4", "max": "0.5" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
                 }
@@ -487,7 +487,7 @@ jobs:
               "ulite/jvm": {
                 "versions": {
                   "0.5.0": {
-                    "abi": { "min": "0.4", "max": "0.4" },
+                    "abi": { "min": "0.4", "max": "0.5" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
                 }
@@ -616,7 +616,7 @@ jobs:
               "ulite/jvm": {
                 "versions": {
                   "0.5.0": {
-                    "abi": { "min": "0.4", "max": "0.4" },
+                    "abi": { "min": "0.4", "max": "0.5" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
                 }
@@ -675,39 +675,87 @@ jobs:
         working-directory: Uliab
         run: cargo build -p uliab
 
-      # A hermetic fake SDK proves the wiring without downloading a real
-      # one: a valid empty zip as android.jar and empty aapt2/d8 markers in
-      # two build-tools releases. Discovery must pick the highest complete
-      # release (36.0.0 over 35.0.0) and the compile task must run javac
-      # against the platform jar; the source avoids android.* imports
-      # precisely because the platform jar is empty. A second build from a
-      # different working directory must come back up-to-date, proving the
-      # block's relative paths resolved against the injected projectDir.
-      - name: Build a Java module against a fake Android SDK
+      # Packaging is exercised against a real SDK: ubuntu-latest ships an
+      # Android SDK with sdkmanager, and this job installs the exact
+      # build-tools release and platform the module declares. That makes
+      # the job ~150MB of download, but a fake SDK cannot run the real
+      # aapt2/d8 chain this plugin now registers. The module mirrors a real
+      # app: a manifest with an activity, res/ with a layout and strings,
+      # and a Main.java that references android.* types and R.* ids — so a
+      # pass means resources were merged, R.java generated and compiled,
+      # classes dexed, and the dex grafted into the apk.
+      - name: Install Android platform and build-tools
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            --install "platforms;android-36" "build-tools;36.0.0" >/dev/null
+
+      - name: Build an android module through the packaging chain
         working-directory: Uliab
         run: |
           set -euxo pipefail
-          mkdir -p /tmp/emptyjar /tmp/fake-sdk/platforms/android-36 \
-            /tmp/fake-sdk/build-tools/35.0.0 /tmp/fake-sdk/build-tools/36.0.0
-          jar c0Mf /tmp/fake-sdk/platforms/android-36/android.jar -C /tmp/emptyjar .
-          touch /tmp/fake-sdk/build-tools/35.0.0/aapt2 /tmp/fake-sdk/build-tools/35.0.0/d8
-          touch /tmp/fake-sdk/build-tools/36.0.0/aapt2 /tmp/fake-sdk/build-tools/36.0.0/d8
-          mkdir -p /tmp/android/src
+          mkdir -p /tmp/android/src /tmp/android/res/layout /tmp/android/res/values
           cat > /tmp/android/src/Main.java <<'JAVA'
-          public class Main {
-              public static String hello() {
-                  return "hello from the android plugin";
+          package com.example.ulite;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.widget.TextView;
+
+          public class Main extends Activity {
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  setContentView(R.layout.activity_main);
+                  ((TextView) findViewById(R.id.greeting)).setText(R.string.hello);
               }
           }
           JAVA
+          cat > /tmp/android/AndroidManifest.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.example.ulite">
+              <application android:label="@string/app_name">
+                  <activity android:name=".Main" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          XML
+          cat > /tmp/android/res/layout/activity_main.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent">
+              <TextView
+                  android:id="@+id/greeting"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content" />
+          </LinearLayout>
+          XML
+          cat > /tmp/android/res/values/strings.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Uliab CI Example</string>
+              <string name="hello">Hello from the CI apk</string>
+          </resources>
+          XML
           cat > /tmp/android/build.ulb <<'ULB'
           android {
             compileSdk = 36
+            minSdk = 21
+            namespace = "com.example.ulite"
             sources = ["src/Main.java"]
             classesDir = "build/classes"
+            manifest = "AndroidManifest.xml"
+            resDir = "res"
+            apk = "build/app-debug.apk"
           }
           ULB
-          printf 'plugins {\n  android = "ulite/android" @ "0.1.0"\n}\n' > /tmp/android/libs.ulb
+          printf 'plugins {\n  android = "ulite/android" @ "0.2.0"\n}\n' > /tmp/android/libs.ulb
           cp ../ulb-plugins/target/wasm32-wasip2/release/android_plugin.wasm /tmp/android/android_plugin.wasm
           cat > /tmp/android/index.json <<'JSON'
           {
@@ -715,8 +763,8 @@ jobs:
             "plugins": {
               "ulite/android": {
                 "versions": {
-                  "0.1.0": {
-                    "abi": { "min": "0.4", "max": "0.4" },
+                  "0.2.0": {
+                    "abi": { "min": "0.4", "max": "0.5" },
                     "artifact_url": "android_plugin.wasm"
                   }
                 }
@@ -728,17 +776,35 @@ jobs:
           uliab="$(pwd)/target/debug/uliab"
           build() {
             "$uliab" build --project /tmp/android \
-              --registry /tmp/android/index.json --cache-dir "$cache" --android-sdk /tmp/fake-sdk
+              --registry /tmp/android/index.json --cache-dir "$cache" --android-sdk "$ANDROID_HOME"
           }
           first="$(build)"
           echo "$first"
-          grep -q '1 ran, 0 up-to-date' <<<"$first"
-          test -f /tmp/android/build/classes/Main.class
+          grep -q '9 ran, 0 up-to-date' <<<"$first"
+          # The apk is complete: manifest, merged resources, resource table,
+          # and the dex grafted onto the aapt2 output.
+          unzip -l /tmp/android/build/app-debug.apk > /tmp/android/apk.list
+          grep -q 'AndroidManifest.xml' /tmp/android/apk.list
+          grep -q 'res/layout/activity_main.xml' /tmp/android/apk.list
+          grep -q 'resources.arsc' /tmp/android/apk.list
+          grep -q 'classes.dex' /tmp/android/apk.list
+          test -f /tmp/android/build/android/R/com/example/ulite/R.java
+          # An unchanged build from another working directory is fully
+          # up-to-date: derived paths resolve against the injected
+          # projectDir, never the invocation directory.
           cd /
-          grep -q '0 ran, 1 up-to-date' <<<"$(build)"
+          grep -q '0 ran, 9 up-to-date' <<<"$(build)"
+          # A resource change reruns the resource chain and everything that
+          # consumes it, but not the mkdirs.
+          cd /tmp/android
+          sed -i 's/Uliab CI Example/Uliab CI Example v2/' res/values/strings.xml
+          grep -q '7 ran, 2 up-to-date' <<<"$(build)"
+          # A source change reruns compile and the dex/package chain only.
+          sed -i 's|setContentView(R.layout.activity_main);|setContentView(R.layout.activity_main); // v2|' src/Main.java
+          grep -q '4 ran, 5 up-to-date' <<<"$(build)"
           # A compile level the SDK does not have must fail configure, not
           # javac, proving discovery ran inside the plugin.
-          sed -i 's/compileSdk = 36/compileSdk = 99/' /tmp/android/build.ulb
+          sed -i 's/compileSdk = 36/compileSdk = 99/' build.ulb
           if build > /tmp/android/err.log 2>&1; then
             echo "a missing platform jar did not fail the build"
             exit 1

@@ -64,28 +64,40 @@ asserts: `slf4j-api` reaches the compile bucket, `junit` does **not**,
 - **removing the `implementation` dep fails main compilation**, proving
   `testImplementation` jars never leak onto the main compile classpath.
 
-### `android-build` — the SDK capability end to end
+### `android-build` — packaging end to end against a real SDK
 
-Builds a Java module against a **hermetic fake SDK**: a valid empty zip
-as `android.jar`, empty `aapt2`/`d8` markers in two `build-tools`
-releases, no real SDK download. This proves the whole SDK capability
-chain without network or gigabytes:
+Builds an android module with a manifest, `res/` layout and strings, and a
+`Main.java` that references `android.*` types and `R.*` ids through the
+**full packaging chain** (`9 ran, 0 up-to-date`): `aapt2 compile` → `aapt2
+link` → `cp` the linked resources to the module's apk → `javac` (with
+`--release 17`) → `jar cf` → `d8` → `jar uf` the dex onto the apk. It
+asserts the apk really contains `AndroidManifest.xml`, the merged layout,
+`resources.arsc`, and `classes.dex`, and that `R.java` was generated under
+the module's `namespace`.
 
-- the host's `--android-sdk` resolves the root and preopens it into the
-  plugin's filesystem;
-- `configure` discovers `android-36/android.jar` and picks the highest
-  complete `build-tools` release (36.0.0 over 35.0.0);
-- the `compile` task runs real `javac` against the platform jar
-  (`1 ran, 0 up-to-date`, `Main.class` produced), and a second build from
-  a different working directory is `0 ran, 1 up-to-date`;
+The SDK is real, not hermetic: ubuntu-latest ships an Android SDK with
+`sdkmanager`, and the job installs the exact `platforms;android-36` and
+`build-tools;36.0.0` the module declares (~150MB). A fake SDK could not
+run the real aapt2/d8 chain this job is here to prove.
+
+Incremental behavior is asserted end to end:
+
+- an unchanged build from a **different working directory** is
+  `0 ran, 9 up-to-date` (derived paths resolve against the injected
+  `projectDir`, never the invocation dir);
+- a resource edit reruns the resource chain and its consumers
+  (`7 ran, 2 up-to-date`);
+- a source edit reruns only compile and the dex/package chain
+  (`4 ran, 5 up-to-date`);
 - a `compileSdk` the SDK does not have fails at configure time with
   `no android.jar for compileSdk 99`, proving discovery ran inside the
   plugin rather than javac failing opaquely.
 
 Like every job here, `android-build` checks out Uliab from `main`, so on
 this repo's own PRs it only goes green once the Uliab host changes it
-exercises (`--android-sdk`, `androidSdkDir` injection, the read-only
-preopen) have landed on Uliab `main` — merge Uliab's SDK PR first.
+exercises (the aapt2 tool, ABI 0.5, directory-tree fingerprints, and the
+SDK injection) have landed on Uliab `main` — merge Uliab's packaging PR
+first.
 
 ### `jvm-runner-discovery` — the generated JUnit Platform runner
 

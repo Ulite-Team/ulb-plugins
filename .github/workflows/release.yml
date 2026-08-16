@@ -1,0 +1,59 @@
+name: release
+
+# Builds the published plugin components and uploads them to the GitHub
+# releases the committed registry index points at
+# (registry/index.json `artifact_url` rows). Run manually after bumping a
+# plugin version or changing the registry index.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ulb-plugins
+
+      - name: Checkout Uliab (plugin sdk)
+        uses: actions/checkout@v4
+        with:
+          repository: Ulite-Team/Uliab
+          path: Uliab
+          token: ${{ secrets.ULITE_PAT }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build plugin components
+        working-directory: ulb-plugins
+        run: |
+          cargo build -p hello-plugin --release --target wasm32-wasip2
+          cargo build -p jvm-plugin --release --target wasm32-wasip2
+
+      - name: Publish release assets
+        working-directory: ulb-plugins
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          publish() {
+            local tag="$1" asset="$2"
+            local path="target/wasm32-wasip2/release/${asset}"
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              gh release upload "$tag" "$path" --clobber --repo "$GITHUB_REPOSITORY"
+            else
+              gh release create "$tag" "$path" --repo "$GITHUB_REPOSITORY" \
+                --latest=false --title "$tag"
+            fi
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY"
+          }
+          publish hello-plugin-v0.4.0 hello_plugin.wasm
+          publish jvm-plugin-v0.5.0 jvm_plugin.wasm

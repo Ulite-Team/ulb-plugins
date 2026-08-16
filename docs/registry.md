@@ -35,23 +35,21 @@ the index and the release assets it points at.
 
 ## The committed index today
 
-`ulite/hello@0.4.0` is the only row. Its `artifact_url` points at a
-release asset (`hello-plugin-v0.4.0/hello_plugin.wasm`); until that
-release exists, the registry jobs in CI seed a *local* index from the
-checkout's build output rather than resolving from GitHub
-([ci.md](ci.md)). The `jvm-build` and KSP jobs do the same with
-`ulite/jvm@0.5.0`, which is intentionally absent from the committed index
-until its artifact is released.
+`ulite/hello@0.4.0` and `ulite/jvm@0.5.0` are the published rows. Their
+`artifact_url` rows point at release assets
+(`hello-plugin-v0.4.0/hello_plugin.wasm`, `jvm-plugin-v0.5.0/jvm_plugin.wasm`)
+published by the `release` workflow. The registry jobs in CI additionally
+seed a *local* index from the checkout's build output so the resolve path
+is exercised without network ([ci.md](ci.md)).
 
 ## Publishing a version
 
-1. Bump the plugin's `version` in its `Cargo.toml` and build the
-   component:
-   `cargo build -p <plugin> --release --target wasm32-wasip2`
-   then `wasm-tools component new` the artifact.
-2. Create a GitHub release named after the tag convention the index
-   points at (e.g. `hello-plugin-v0.4.0`) and upload the component under
-   the file name the URL references.
+1. Bump the plugin's `version` in its `Cargo.toml`.
+2. Run the `release` workflow (`.github/workflows/release.yml`): it builds
+   each plugin's component (`cargo build -p <plugin> --release --target
+   wasm32-wasip2`, linked into a component by the wasm32-wasip2 target) and
+   uploads it to a GitHub release named after the tag convention the index
+   points at, under the file name the `artifact_url` references.
 3. Add the version row to `registry/index.json` with the plugin's actual
    ABI range and artifact URL, and commit.
 

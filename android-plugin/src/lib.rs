@@ -90,7 +90,7 @@ mod bindings {
             // compile without its platform jar, and a build-tools release
             // lacking aapt2 or d8 cannot later package the module, so both
             // must exist for configure to succeed.
-            let sdk_root = resolve_sdk_root(&config, android)?;
+            let sdk_root = resolve_sdk_root(&config, android, project_dir)?;
             let platform_jar = android_jar(&sdk_root, compile_sdk)?;
             highest_build_tools(&sdk_root)?;
 
@@ -170,16 +170,20 @@ fn int_value(android: &serde_json::Value, key: &str) -> Result<i64, String> {
         .ok_or_else(|| format!("the 'android' block is missing a numeric '{key}'"))
 }
 
-/// The SDK root the build uses: the module block's `sdkDir` when set,
+/// The SDK root the build uses: the module block's `sdkDir` when set
+/// (resolved against the project directory like every other block path),
 /// otherwise the root the host injected as `androidSdkDir` (its own
-/// `--android-sdk` flag or environment conventions). Both missing is a
-/// configure error — the SDK cannot be invented.
+/// `--android-sdk` flag or environment conventions, always absolute). Both
+/// missing is a configure error — the SDK cannot be invented. The host
+/// preopens both roots read-only at their real paths, so either is
+/// discoverable from the guest regardless of which one is chosen.
 fn resolve_sdk_root(
     config: &serde_json::Value,
     android: &serde_json::Value,
+    project_dir: &str,
 ) -> Result<std::path::PathBuf, String> {
     if let Some(sdk_dir) = android.get("sdkDir").and_then(serde_json::Value::as_str) {
-        return Ok(std::path::PathBuf::from(sdk_dir));
+        return Ok(std::path::PathBuf::from(resolve_path(project_dir, sdk_dir)));
     }
     config
         .get("androidSdkDir")
@@ -391,8 +395,20 @@ mod tests {
         let config = json!({ "androidSdkDir": "/default/sdk" });
         let block = json!({ "sdkDir": "/module/sdk" });
         assert_eq!(
-            resolve_sdk_root(&config, &block).expect("resolves"),
+            resolve_sdk_root(&config, &block, "/proj").expect("resolves"),
             PathBuf::from("/module/sdk")
+        );
+    }
+
+    #[test]
+    fn sdk_root_resolves_a_relative_module_sdk_dir_against_the_project_dir() {
+        // The host preopens the module sdkDir at `<projectDir>/<path>`, so
+        // the plugin must resolve it the same way to see the same directory.
+        let config = json!({});
+        let block = json!({ "sdkDir": "vendor/sdk" });
+        assert_eq!(
+            resolve_sdk_root(&config, &block, "/proj").expect("resolves"),
+            PathBuf::from("/proj/vendor/sdk")
         );
     }
 
@@ -401,7 +417,7 @@ mod tests {
         let config = json!({ "androidSdkDir": "/default/sdk" });
         let block = json!({});
         assert_eq!(
-            resolve_sdk_root(&config, &block).expect("resolves"),
+            resolve_sdk_root(&config, &block, "/proj").expect("resolves"),
             PathBuf::from("/default/sdk")
         );
     }
@@ -410,7 +426,7 @@ mod tests {
     fn sdk_root_errors_when_nowhere_to_be_found() {
         let config = json!({});
         let block = json!({});
-        assert!(resolve_sdk_root(&config, &block).is_err());
+        assert!(resolve_sdk_root(&config, &block, "/proj").is_err());
     }
 
     #[test]

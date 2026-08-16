@@ -1,7 +1,8 @@
 # CI (`plugin-build.yml`)
 
-A single workflow, `plugin-build`, with seven jobs on `push: [main]` and
-`workflow_dispatch`. Every job builds real `wasm32-wasip2` components and
+A single workflow, `plugin-build`, with seven jobs on `push: [main]`,
+`pull_request` (against `main`), and `workflow_dispatch`. Every job builds
+real `wasm32-wasip2` components and
 runs them under the real `uliab` host — there are no mocks anywhere.
 
 ## Common setup
@@ -80,6 +81,11 @@ chain without network or gigabytes:
 - a `compileSdk` the SDK does not have fails at configure time with
   `no android.jar for compileSdk 99`, proving discovery ran inside the
   plugin rather than javac failing opaquely.
+
+Like every job here, `android-build` checks out Uliab from `main`, so on
+this repo's own PRs it only goes green once the Uliab host changes it
+exercises (`--android-sdk`, `androidSdkDir` injection, the read-only
+preopen) have landed on Uliab `main` — merge Uliab's SDK PR first.
 
 ### `jvm-runner-discovery` — the generated JUnit Platform runner
 

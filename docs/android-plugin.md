@@ -23,7 +23,9 @@ The host also **preopens** the chosen root into the plugin's WASI
 filesystem, read-only, at its real path (`Uliab/docs/architecture.md §3.2`):
 that is how `configure` can inspect it at all, since a wasm guest has no
 ambient filesystem. Access is read-only — a plugin can read the SDK but
-never modify it.
+never modify it. A module-declared `sdkDir` is preopened too, so a
+per-module SDK that differs from the host's root is discoverable the same
+way: the host preopens both the resolved root and the module's own path.
 
 ## Module block
 
@@ -35,7 +37,7 @@ following keys:
 | `compileSdk` | integer | The API level to compile against. Required. `configure` looks for the matching platform jar. |
 | `sources` | list of strings | `.java` files to compile. At least one entry is required. Kotlin sources are not supported yet. |
 | `classesDir` | string | Directory `javac` writes `.class` files to. |
-| `sdkDir` | string, optional | Per-module SDK root, overriding the host-injected `androidSdkDir`. |
+| `sdkDir` | string, optional | Per-module SDK root, overriding the host-injected `androidSdkDir`. Relative paths resolve against the project directory, like every other block path. |
 
 The values are resolved against the project directory the host injects
 (`projectDir`); absolute paths are used as written.

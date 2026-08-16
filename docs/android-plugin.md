@@ -35,7 +35,7 @@ following keys:
 |---|---|---|
 | `compileSdk` | integer | The API level to compile against. Required. `configure` looks for the matching platform jar. |
 | `minSdk` | integer | The minimum API level the APK runs on; `aapt2 link` records it and `d8` uses it as `--min-api`. Required. |
-| `targetSdk` | integer, optional | The API level the APK targets; defaults to `compileSdk`. |
+| `targetSdk` | integer, optional | The API level the APK targets; defaults to `compileSdk`. A supplied value that is not an integer is a configure error — it never silently falls back to `compileSdk`. |
 | `namespace` | string | The package the generated `R` class lives in, handed to `aapt2 link` as `--custom-package`. Required. |
 | `sources` | list of strings | `.java` files to compile. At least one entry is required. Kotlin sources are not supported yet. |
 | `classesDir` | string | Directory `javac` writes `.class` files to. |
@@ -98,7 +98,7 @@ outside that tree:
 - `build/android/resources.apk` — the linked resources APK.
 - `build/android/R/` — the generated `R.java` (`<namespace>/R.java`).
 - `build/classes.jar` — the compiled classes, archived for d8.
-- `build/dex/` — the `classes.dex` output.
+- `build/dex/` — the d8 output, `classes.dex` (plus `classes2.dex`, ... for a module that overflows one dex file).
 
 ## Registered tasks
 
@@ -108,14 +108,15 @@ produce its inputs:
 | Task | Tool | Action |
 |---|---|---|
 | `prepareBuildDir` | `mkdir` | `mkdir -p <build>/android` (aapt2 creates neither its output parent nor the dex dir). |
+| `prepareApkDir` | `mkdir` | `mkdir -p <apk parent>` — the apk may live outside `<build>/android`, and the `prepareApk` copy cannot create its own parent. |
 | `mergeResources` | `aapt2` | `aapt2 compile --dir <resDir> -o <build>/android/res.zip`. |
 | `linkResources` | `aapt2` | `aapt2 link -o <build>/android/resources.apk --manifest <manifest> -I <android.jar> --java <build>/android/R --custom-package <namespace> --min-sdk-version <minSdk> --target-sdk-version <targetSdk> <res.zip>`. |
-| `prepareApk` | `cp` | `cp <build>/android/resources.apk <apk>`, seeding the module's apk before the dex is grafted (`jar uf` refuses a missing archive). |
+| `prepareApk` | `cp` | `cp <build>/android/resources.apk <apk>`, seeding the module's apk before the dex is grafted (`jar uf` refuses a missing archive). Depends on `prepareApkDir`. |
 | `compile` | `javac` | `javac --release 17 -d <classesDir> -cp <android.jar>:<classpath.compile> -sourcepath <build>/android/R <sources> <build>/android/R/<namespace>/R.java`. |
 | `jarClasses` | `jar` | `jar cf <build>/classes.jar -C <classesDir> .`, since d8 accepts archives but not directories. |
 | `prepareDex` | `mkdir` | `mkdir -p <build>/dex`. |
 | `compileDex` | `java` | `java -cp <build-tools>/lib/d8.jar com.android.tools.r8.D8 --lib <android.jar> --min-api <minSdk> --output <build>/dex <build>/classes.jar`. |
-| `packageApk` | `jar` | `jar uf <apk> -C <build>/dex classes.dex`, grafting the dex onto the resources. |
+| `packageApk` | `jar` | `jar uf <apk> -C <build>/dex .`, grafting every `classes*.dex` d8 emitted onto the resources. Depends on `prepareApk` so it never runs before the seeded apk exists. |
 
 Tasks declare their real inputs and outputs, so the host's fingerprinting
 skips a task until its own sources change, and a changed resource cascades

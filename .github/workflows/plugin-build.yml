@@ -780,7 +780,7 @@ jobs:
           }
           first="$(build)"
           echo "$first"
-          grep -q '9 ran, 0 up-to-date' <<<"$first"
+          grep -q '10 ran, 0 up-to-date' <<<"$first"
           # The apk is complete: manifest, merged resources, resource table,
           # and the dex grafted onto the aapt2 output.
           unzip -l /tmp/android/build/app-debug.apk > /tmp/android/apk.list
@@ -793,15 +793,15 @@ jobs:
           # up-to-date: derived paths resolve against the injected
           # projectDir, never the invocation directory.
           cd /
-          grep -q '0 ran, 9 up-to-date' <<<"$(build)"
+          grep -q '0 ran, 10 up-to-date' <<<"$(build)"
           # A resource change reruns the resource chain and everything that
           # consumes it, but not the mkdirs.
           cd /tmp/android
           sed -i 's/Uliab CI Example/Uliab CI Example v2/' res/values/strings.xml
-          grep -q '7 ran, 2 up-to-date' <<<"$(build)"
+          grep -q '7 ran, 3 up-to-date' <<<"$(build)"
           # A source change reruns compile and the dex/package chain only.
           sed -i 's|setContentView(R.layout.activity_main);|setContentView(R.layout.activity_main); // v2|' src/Main.java
-          grep -q '4 ran, 5 up-to-date' <<<"$(build)"
+          grep -q '4 ran, 6 up-to-date' <<<"$(build)"
           # A compile level the SDK does not have must fail configure, not
           # javac, proving discovery ran inside the plugin.
           sed -i 's/compileSdk = 36/compileSdk = 99/' build.ulb

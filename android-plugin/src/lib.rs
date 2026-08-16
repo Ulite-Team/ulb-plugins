@@ -25,8 +25,10 @@
 //! The registered tasks form the packaging chain (all run-tool, all paths
 //! absolute):
 //!
-//! - `prepareBuildDir` / `prepareDex` — `mkdir -p` the derived output
-//!   directories (`aapt2` and `d8` refuse to create their own parents).
+//! - `prepareBuildDir` / `prepareDex` / `prepareApkDir` — `mkdir -p` the
+//!   derived output directories (`aapt2` and `d8` refuse to create their own
+//!   parents). The apk's parent is created by its own task because a module
+//!   may place the apk outside `<build>/android`.
 //! - `mergeResources` — `aapt2 compile --dir <resDir> -o <build>/res.zip`.
 //! - `linkResources` — `aapt2 link` the compiled resources with the
 //!   manifest into `<build>/resources.apk`, generating `R.java` under
@@ -45,8 +47,10 @@
 //! - `compileDex` — `java -cp <build-tools>/lib/d8.jar D8 --lib
 //!   <android.jar> --min-api <minSdk> --output <build>/dex
 //!   <build>/classes.jar`.
-//! - `packageApk` — `jar uf <apk> -C <build>/dex classes.dex`, grafting the
-//!   dex onto the resources the `prepareApk` copy placed in the apk.
+//! - `packageApk` — `jar uf <apk> -C <build>/dex .`, grafting every
+//!   `classes*.dex` d8 emitted (a module that overflows one dex file yields
+//!   `classes2.dex`, `classes3.dex`, ...) onto the resources the
+//!   `prepareApk` copy placed in the apk.
 //!
 //! Task inputs are the source files and the resource directory, so the
 //! host's fingerprinting leaves a task alone until its own sources change;
@@ -68,8 +72,8 @@ mod bindings {
 
     use crate::{
         android_jar, classpath_bucket, compile_args, d8_args, highest_build_tools, int_value,
-        optional_int, reject_unknown_extensions, resolve_path, resolve_sdk_root, rgen_java_path,
-        string_list, string_value,
+        optional_int, package_args, reject_unknown_extensions, resolve_path, resolve_sdk_root,
+        rgen_java_path, string_list, string_value,
     };
     use exports::ulite::ulb::ulb_plugin::{Guest, PluginManifest};
     use serde_json::Value;
@@ -109,7 +113,7 @@ mod bindings {
 
             let compile_sdk = int_value(android, "compileSdk")?;
             let min_sdk = int_value(android, "minSdk")?;
-            let target_sdk = optional_int(android, "targetSdk").unwrap_or(compile_sdk);
+            let target_sdk = optional_int(android, "targetSdk")?.unwrap_or(compile_sdk);
             let namespace = string_value(android, "namespace")?;
             let sources = resolve_paths(project_dir, &string_list(android, "sources")?);
             if sources.is_empty() {
@@ -152,6 +156,9 @@ mod bindings {
             let rgen_java = rgen_java_path(&rgen_dir, &namespace);
             let classes_jar = std::path::Path::new(project_dir).join("build/classes.jar");
             let dex_dir = std::path::Path::new(project_dir).join("build/dex");
+            let apk_dir = std::path::Path::new(&apk).parent().ok_or_else(|| {
+                format!("the configured apk path '{apk}' has no parent directory")
+            })?;
 
             run_tool_task(
                 "prepareBuildDir",
@@ -160,6 +167,14 @@ mod bindings {
                 vec![],
                 AllowlistedTool::Mkdir,
                 vec!["-p".to_owned(), build_dir.to_string_lossy().into_owned()],
+            )?;
+            run_tool_task(
+                "prepareApkDir",
+                vec![],
+                vec![],
+                vec![],
+                AllowlistedTool::Mkdir,
+                vec!["-p".to_owned(), apk_dir.to_string_lossy().into_owned()],
             )?;
             run_tool_task(
                 "mergeResources",
@@ -212,7 +227,7 @@ mod bindings {
                 "prepareApk",
                 vec![resources_apk.to_string_lossy().into_owned()],
                 vec![apk.clone()],
-                vec!["linkResources".to_owned()],
+                vec!["linkResources".to_owned(), "prepareApkDir".to_owned()],
                 AllowlistedTool::Cp,
                 vec![resources_apk.to_string_lossy().into_owned(), apk.clone()],
             )?;
@@ -261,15 +276,13 @@ mod bindings {
                     dex_dir.to_string_lossy().into_owned(),
                 ],
                 vec![apk.clone()],
-                vec!["linkResources".to_owned(), "compileDex".to_owned()],
-                AllowlistedTool::Jar,
                 vec![
-                    "uf".to_owned(),
-                    apk,
-                    "-C".to_owned(),
-                    dex_dir.to_string_lossy().into_owned(),
-                    "classes.dex".to_owned(),
+                    "linkResources".to_owned(),
+                    "prepareApk".to_owned(),
+                    "compileDex".to_owned(),
                 ],
+                AllowlistedTool::Jar,
+                package_args(std::path::Path::new(&apk), &dex_dir),
             )?;
 
             Ok(())
@@ -553,18 +566,39 @@ fn d8_args(
     ]
 }
 
-/// Reads an optional integer key of the module block; `None` when the key
-/// is absent or holds a non-number.
-fn optional_int(android: &serde_json::Value, key: &str) -> Option<i64> {
-    android.get(key).and_then(serde_json::Value::as_i64)
+/// Reads an optional integer key of the module block: `Ok(None)` when the
+/// key is absent, `Ok(Some(n))` when it holds a number, and an error when a
+/// supplied value is not a number — `targetSdk = "36"` must fail configure
+/// rather than silently fall back to `compileSdk`.
+fn optional_int(android: &serde_json::Value, key: &str) -> Result<Option<i64>, String> {
+    match android.get(key) {
+        None => Ok(None),
+        Some(value) => value.as_i64().map(Some).ok_or_else(|| {
+            format!("the 'android' block key '{key}' must be an integer, found {value}")
+        }),
+    }
+}
+
+/// The `jar` invocation that grafts the dex onto the seeded apk: everything
+/// under the d8 output directory, so a module that overflows a single dex
+/// file (d8 then emits `classes.dex`, `classes2.dex`, ...) gets every
+/// emitted dex packaged rather than only the first.
+fn package_args(apk: &std::path::Path, dex_dir: &std::path::Path) -> Vec<String> {
+    vec![
+        "uf".to_owned(),
+        apk.to_string_lossy().into_owned(),
+        "-C".to_owned(),
+        dex_dir.to_string_lossy().into_owned(),
+        ".".to_owned(),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         android_jar, classpath_bucket, compile_args, d8_args, highest_build_tools, int_value,
-        optional_int, reject_unknown_extensions, resolve_path, resolve_sdk_root, rgen_java_path,
-        string_list, string_value, version_rank,
+        optional_int, package_args, reject_unknown_extensions, resolve_path, resolve_sdk_root,
+        rgen_java_path, string_list, string_value, version_rank,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -767,9 +801,28 @@ mod tests {
     #[test]
     fn optional_int_reads_present_absent_and_invalid() {
         let block = json!({ "minSdk": 21, "targetSdk": "36" });
-        assert_eq!(optional_int(&block, "minSdk"), Some(21));
-        assert_eq!(optional_int(&block, "targetSdk"), None);
-        assert_eq!(optional_int(&block, "compileSdk"), None);
+        assert_eq!(optional_int(&block, "minSdk"), Ok(Some(21)));
+        assert_eq!(optional_int(&block, "compileSdk"), Ok(None));
+        let error = optional_int(&block, "targetSdk").expect_err("non-number");
+        assert!(error.contains("targetSdk"), "{error}");
+    }
+
+    #[test]
+    fn package_invocation_grafts_every_dex_file_onto_the_apk() {
+        let args = package_args(
+            std::path::Path::new("/proj/build/app-debug.apk"),
+            std::path::Path::new("/proj/build/dex"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "uf".to_owned(),
+                "/proj/build/app-debug.apk".to_owned(),
+                "-C".to_owned(),
+                "/proj/build/dex".to_owned(),
+                ".".to_owned(),
+            ]
+        );
     }
 
     #[test]

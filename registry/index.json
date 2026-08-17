@@ -33,6 +33,17 @@
           "artifact_url": "https://github.com/Ulite-Team/ulb-plugins/releases/download/android-plugin-v0.2.0/android_plugin.wasm"
         }
       }
+    },
+    "ulite/kmp": {
+      "versions": {
+        "0.1.0": {
+          "abi": {
+            "min": "0.5",
+            "max": "0.5"
+          },
+          "artifact_url": "https://github.com/Ulite-Team/ulb-plugins/releases/download/kmp-plugin-v0.1.0/kmp_plugin.wasm"
+        }
+      }
     }
   }
 }

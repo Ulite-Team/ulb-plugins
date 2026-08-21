@@ -2,10 +2,11 @@
 
 The `ulite/android` plugin compiles the module's Java sources against the
 Android platform jar for its declared `compileSdk`, merges the module's
-resources with `aapt2`, dexes the classes with `d8`, and assembles the
-APK. It implements the compile-and-package part of what
-`Uliab/docs/architecture.md §5.2` assigns to `ulite/android`; the variant
-matrix and manifest merging are future slices of the same plugin.
+resources with `aapt2`, dexes the classes with `d8`, and assembles
+per-variant APKs. It implements the compile-and-package part of what
+`Uliab/docs/architecture.md §5.2` assigns to `ulite/android`; manifest
+merging and additional packaging features are future slices of the same
+plugin.
 
 ## The SDK
 
@@ -19,10 +20,10 @@ not ship one — so the SDK root comes from the build, not the module:
 3. a configure error — the SDK cannot be invented.
 
 The host also **preopens** the chosen root into the plugin's WASI
-filesystem, read-only, at its real path (`Uliab/docs/architecture.md §3.2`):
-that is how `configure` can inspect it at all, since a wasm guest has no
-ambient filesystem. Access is read-only — a plugin can read the SDK but
-never modify it. A module-declared `sdkDir` is preopened too, so a
+filesystem, read-only, at its real path (`Uliab/docs/architecture.md
+§3.2`): that is how `configure` can inspect it at all, since a wasm guest
+has no ambient filesystem. Access is read-only — a plugin can read the SDK
+but never modify it. A module-declared `sdkDir` is preopened too, so a
 per-module SDK that differs from the host's root is discoverable the same
 way: the host preopens both the resolved root and the module's own path.
 
@@ -34,15 +35,13 @@ following keys:
 | Key | Type | Meaning |
 |---|---|---|
 | `compileSdk` | integer | The API level to compile against. Required. `configure` looks for the matching platform jar. |
-| `minSdk` | integer | The minimum API level the APK runs on; `aapt2 link` records it and `d8` uses it as `--min-api`. Required. |
-| `targetSdk` | integer, optional | The API level the APK targets; defaults to `compileSdk`. A supplied value that is not an integer is a configure error — it never silently falls back to `compileSdk`. |
+| `minSdk` | integer | The default minimum API level; `aapt2 link` records it and `d8` uses it as `--min-api`. A per-flavor `minSdk` in `productFlavors {}` overrides this. Required. |
+| `targetSdk` | integer, optional | The default target API level; defaults to `compileSdk`. A supplied value that is not an integer is a configure error. |
 | `namespace` | string | The package the generated `R` class lives in, handed to `aapt2 link` as `--custom-package`. Required. |
 | `sources` | list of strings | `.java` files to compile. At least one entry is required. Kotlin sources are not supported yet. |
-| `classesDir` | string | Directory `javac` writes `.class` files to. |
 | `manifest` | string | The `AndroidManifest.xml` `aapt2 link` merges and packages. Required. |
 | `resDir` | string | The `res/` directory `aapt2 compile` merges. Required. |
-| `apk` | string | The APK the module produces. Required. |
-| `sdkDir` | string, optional | Per-module SDK root, overriding the host-injected `androidSdkDir`. Relative paths resolve against the project directory, like every other block path. |
+| `sdkDir` | string, optional | Per-module SDK root, overriding the host-injected `androidSdkDir`. Relative paths resolve against the project directory. |
 
 The values are resolved against the project directory the host injects
 (`projectDir`); absolute paths are used as written.
@@ -55,10 +54,8 @@ android {
   minSdk = 21
   namespace = "com.example.ulite"
   sources = ["src/Main.java"]
-  classesDir = "build/classes"
   manifest = "AndroidManifest.xml"
   resDir = "res"
-  apk = "build/app-debug.apk"
 }
 ```
 
@@ -72,6 +69,92 @@ but they are not part of the `android {}` block:
 | `projectDir` | The project directory the build was started for, always absolute. |
 | `androidSdkDir` | The resolved SDK root (from the host's `--android-sdk` flag or environment conventions), when one exists. |
 | `classpath.compile` | Jar paths resolved from the module's `deps {}` block for the compile scope. |
+
+## Build types and product flavors
+
+`buildTypes {}` and `productFlavors {}` are optional blocks that define
+the variant matrix. The plugin computes the cartesian product of build
+types x flavors; each cell becomes a separate variant with its own
+compile, dex, and packaging tasks.
+
+Without either block, the default pair `[debug, release]` is used and
+two variants are produced: `Debug` and `Release`.
+
+### `buildTypes {}`
+
+Named blocks (`debug`, `release`, or custom). The plugin currently
+recognizes these keys but does not yet act on them (minification and
+shrinking are deferred):
+
+| Key | Type | Meaning |
+|---|---|---|
+| `minifyEnabled` | boolean | R8/minification |
+| `shrinkResources` | boolean | resource shrinking |
+| `proguardFiles` | list of strings | proguard rule files |
+
+### `productFlavors {}`
+
+The `productFlavors {}` block declares flavor dimensions and flavor
+blocks:
+
+- `dimension "tier"` (pair statement) declares a flavor dimension.
+- Flavor blocks (`free { }`, `paid { }`) may carry any of:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `dimension` | string | which dimension this flavor belongs to; optional when exactly one dimension is declared |
+| `applicationIdSuffix` | string | appended to the namespace as `--rename-manifest-package` on `aapt2 link` |
+| `minSdk` | number | flavor-specific floor, overriding `android.minSdk` |
+
+Example with flavors:
+
+```text
+productFlavors {
+  dimension "tier"
+
+  free {
+    applicationIdSuffix = ".free"
+  }
+  paid {
+    applicationIdSuffix = ".paid"
+  }
+}
+```
+
+This produces four variants: `DebugFree`, `DebugPaid`, `ReleaseFree`,
+`ReleasePaid`.
+
+### Variant naming
+
+- Task suffixes are PascalCase: `compileDebug`, `linkResourcesReleaseFree`.
+- Variant directories are camelCase: `debug`, `releaseFree`.
+- APK filenames: `app-debug.apk`, `app-releaseFree.apk`.
+- Each variant's APK lives under `<project>/build/<variant>/`.
+
+## Signing
+
+The optional `signing {}` block at the module level configures APK
+signing. Signing is shared across all variants: the password files are
+written once, and each variant's `signApk` task reads the same keystore
+and passwords.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `storeFile` | string | Path to the keystore, resolved against the project directory. Required. |
+| `storePassword` | string | Keystore password. Required. |
+| `keyAlias` | string | Key alias within the keystore. Required. |
+| `keyPassword` | string | Key password. Required. |
+
+Example:
+
+```text
+signing {
+  storeFile = "release.keystore"
+  storePassword = env("RELEASE_STORE_PASSWORD")
+  keyAlias = "release"
+  keyPassword = env("RELEASE_KEY_PASSWORD")
+}
+```
 
 ## Toolchain discovery
 
@@ -91,32 +174,40 @@ at configure time — before anything runs — when the SDK is unusable:
 ## Build products
 
 Everything the tools produce lives under `<project>/build/`, derived from
-the injected `projectDir`; the module's `apk` is the only declared path
-outside that tree:
+the injected `projectDir`:
 
 - `build/android/res.zip` — the merged resources, `aapt2 compile` output.
-- `build/android/resources.apk` — the linked resources APK.
-- `build/android/R/` — the generated `R.java` (`<namespace>/R.java`).
-- `build/classes.jar` — the compiled classes, archived for d8.
-- `build/dex/` — the d8 output, `classes.dex` (plus `classes2.dex`, ... for a module that overflows one dex file).
+- `build/<variant>/resources.apk` — the linked resources APK for the variant.
+- `build/<variant>/R/` — the generated `R.java` for the variant.
+- `build/<variant>/classes` — the compiled `.class` files for the variant.
+- `build/<variant>/classes.jar` — the classes archived for d8.
+- `build/<variant>/dex/` — the d8 output for the variant.
+- `build/<variant>/app-<variant>.apk` — the final APK for the variant.
 
 ## Registered tasks
 
-The tasks form the packaging chain, each depending on the ones that
-produce its inputs:
+Shared tasks (registered once):
 
 | Task | Tool | Action |
 |---|---|---|
-| `prepareBuildDir` | `mkdir` | `mkdir -p <build>/android` (aapt2 creates neither its output parent nor the dex dir). |
-| `prepareApkDir` | `mkdir` | `mkdir -p <apk parent>` — the apk may live outside `<build>/android`, and the `prepareApk` copy cannot create its own parent. |
+| `prepareBuildDir` | `mkdir` | `mkdir -p <build>/android`. |
 | `mergeResources` | `aapt2` | `aapt2 compile --dir <resDir> -o <build>/android/res.zip`. |
-| `linkResources` | `aapt2` | `aapt2 link -o <build>/android/resources.apk --manifest <manifest> -I <android.jar> --java <build>/android/R --custom-package <namespace> --min-sdk-version <minSdk> --target-sdk-version <targetSdk> <res.zip>`. |
-| `prepareApk` | `cp` | `cp <build>/android/resources.apk <apk>`, seeding the module's apk before the dex is grafted (`jar uf` refuses a missing archive). Depends on `prepareApkDir`. |
-| `compile` | `javac` | `javac --release 17 -d <classesDir> -cp <android.jar>:<classpath.compile> -sourcepath <build>/android/R <sources> <build>/android/R/<namespace>/R.java`. |
-| `jarClasses` | `jar` | `jar cf <build>/classes.jar -C <classesDir> .`, since d8 accepts archives but not directories. |
-| `prepareDex` | `mkdir` | `mkdir -p <build>/dex`. |
-| `compileDex` | `java` | `java -cp <build-tools>/lib/d8.jar com.android.tools.r8.D8 --lib <android.jar> --min-api <minSdk> --output <build>/dex <build>/classes.jar`. |
-| `packageApk` | `jar` | `jar uf <apk> -C <build>/dex .`, grafting every `classes*.dex` d8 emitted onto the resources. Depends on `prepareApk` so it never runs before the seeded apk exists. |
+| `writeSigningPasswords` | `write_file` | Writes `<build>/android/ks-password.txt` from `signing.storePassword`. Only when `signing {}` is present. |
+| `writeSigningKeyPassword` | `write_file` | Writes `<build>/android/key-password.txt` from `signing.keyPassword`. Only when `signing {}` is present. |
+
+Per-variant tasks (suffixed with PascalCase variant name):
+
+| Task | Tool | Action |
+|---|---|---|
+| `prepareApk<V>` | `mkdir` | `mkdir -p <build>/<variant>/`. |
+| `prepareDex<V>` | `mkdir` | `mkdir -p <build>/<variant>/dex/`. |
+| `linkResources<V>` | `aapt2` | `aapt2 link -o <variant>/resources.apk --manifest <manifest> -I <android.jar> --java <variant>/R --custom-package <ns> --min-sdk-version <minSdk> --target-sdk-version <targetSdk> [--rename-manifest-package <ns><suffix>] <res.zip>`. |
+| `seedApk<V>` | `cp` | `cp <variant>/resources.apk <variant>/app-<variant>.apk`. |
+| `compile<V>` | `javac` | `javac --release 17 -d <variant>/classes -cp <android.jar>:<classpath> -sourcepath <variant>/R <sources> <variant>/R/<namespace>/R.java`. |
+| `jarClasses<V>` | `jar` | `jar cf <variant>/classes.jar -C <variant>/classes .`. |
+| `compileDex<V>` | `java` | `java -cp <build-tools>/lib/d8.jar com.android.tools.r8.D8 --lib <android.jar> --min-api <minSdk> --output <variant>/dex <variant>/classes.jar`. |
+| `packageApk<V>` | `jar` | `jar uf <variant>/app-<variant>.apk -C <variant>/dex .`. |
+| `signApk<V>` | `apksigner` | `apksigner sign --ks <keystore> --ks-key-alias <alias> --ks-pass file:<ks-password> --key-pass file:<key-password> <variant>/app-<variant>.apk`. Only when `signing {}` is present. |
 
 Tasks declare their real inputs and outputs, so the host's fingerprinting
 skips a task until its own sources change, and a changed resource cascades
@@ -132,6 +223,6 @@ regardless of the JDK the host runs.
 
 ## Manifest
 
-The plugin declares `javac`, `aapt2`, `jar`, `java`, `mkdir`, and `cp`
-as the tools of its run-tool tasks, per the host's
-manifest-declared-tools check. It reports ABI `0.5`.
+The plugin declares `javac`, `aapt2`, `jar`, `java`, `mkdir`, `cp`, and
+`apksigner` as the tools of its run-tool tasks, per the host's
+manifest-declared-tools check. It reports ABI `0.6`.

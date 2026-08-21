@@ -22,6 +22,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
+          ref: feat/multi-module-and-signing
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -65,6 +66,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
+          ref: feat/multi-module-and-signing
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -136,6 +138,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
+          ref: feat/multi-module-and-signing
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -296,6 +299,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
+          ref: feat/multi-module-and-signing
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -418,6 +422,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
+          ref: feat/multi-module-and-signing
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -546,6 +551,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
+          ref: feat/multi-module-and-signing
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -658,6 +664,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
+          ref: feat/multi-module-and-signing
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -749,10 +756,8 @@ jobs:
             minSdk = 21
             namespace = "com.example.ulite"
             sources = ["src/Main.java"]
-            classesDir = "build/classes"
             manifest = "AndroidManifest.xml"
             resDir = "res"
-            apk = "build/app-debug.apk"
           }
           ULB
           printf 'plugins {\n  android = "ulite/android" @ "0.2.0"\n}\n' > /tmp/android/libs.ulb
@@ -780,28 +785,28 @@ jobs:
           }
           first="$(build)"
           echo "$first"
-          grep -q '10 ran, 0 up-to-date' <<<"$first"
+          grep -q '18 ran, 0 up-to-date' <<<"$first"
           # The apk is complete: manifest, merged resources, resource table,
           # and the dex grafted onto the aapt2 output.
-          unzip -l /tmp/android/build/app-debug.apk > /tmp/android/apk.list
+          unzip -l /tmp/android/build/debug/app-debug.apk > /tmp/android/apk.list
           grep -q 'AndroidManifest.xml' /tmp/android/apk.list
           grep -q 'res/layout/activity_main.xml' /tmp/android/apk.list
           grep -q 'resources.arsc' /tmp/android/apk.list
           grep -q 'classes.dex' /tmp/android/apk.list
-          test -f /tmp/android/build/android/R/com/example/ulite/R.java
+          test -f /tmp/android/build/debug/R/com/example/ulite/R.java
           # An unchanged build from another working directory is fully
           # up-to-date: derived paths resolve against the injected
           # projectDir, never the invocation directory.
           cd /
-          grep -q '0 ran, 10 up-to-date' <<<"$(build)"
+          grep -q '0 ran, 18 up-to-date' <<<"$(build)"
           # A resource change reruns the resource chain and everything that
           # consumes it, but not the mkdirs.
           cd /tmp/android
           sed -i 's/Uliab CI Example/Uliab CI Example v2/' res/values/strings.xml
-          grep -q '7 ran, 3 up-to-date' <<<"$(build)"
+          grep -q '7 ran, 11 up-to-date' <<<"$(build)"
           # A source change reruns compile and the dex/package chain only.
           sed -i 's|setContentView(R.layout.activity_main);|setContentView(R.layout.activity_main); // v2|' src/Main.java
-          grep -q '4 ran, 6 up-to-date' <<<"$(build)"
+          grep -q '8 ran, 10 up-to-date' <<<"$(build)"
           # A compile level the SDK does not have must fail configure, not
           # javac, proving discovery ran inside the plugin.
           sed -i 's/compileSdk = 36/compileSdk = 99/' build.ulb

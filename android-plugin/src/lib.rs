@@ -224,7 +224,7 @@ mod bindings {
                 task_registrar::register_task(&Task {
                     name: "writeSigningPasswords".to_owned(),
                     inputs: vec![],
-                    outputs: vec![ks_password_file.clone(), key_password_file.clone()],
+                    outputs: vec![ks_password_file.clone()],
                     depends_on: vec![],
                     action: Action::WriteFile(write_file_args(&ks_password_file, store_password)),
                 })?;
@@ -283,7 +283,11 @@ mod bindings {
                         variant_resources_apk.to_string_lossy().into_owned(),
                         variant_rgen_dir.to_string_lossy().into_owned(),
                     ],
-                    vec!["prepareBuildDir".to_owned(), "mergeResources".to_owned()],
+                    vec![
+                        "prepareBuildDir".to_owned(),
+                        "mergeResources".to_owned(),
+                        format!("prepareApk{}", variant.name),
+                    ],
                     AllowlistedTool::Aapt2,
                     {
                         let mut args = vec![
@@ -493,12 +497,15 @@ struct Variant {
 }
 
 /// Computes the variant matrix from the module config's `buildTypes {}` and
-/// productFlavors {}` blocks.
+/// `productFlavors {}` blocks.
 ///
-/// The matrix is the cartesian product of build types × flavors, where each
-/// variant contains exactly one flavor per dimension. When `buildTypes {}` is
-/// absent, `[debug, release]` is the default. When `productFlavors {}` is
-/// absent, each build type stands alone as a variant.
+/// The matrix is the cartesian product of build types × flavors. When
+/// `buildTypes {}` is absent, `[debug, release]` is the default. When
+/// `productFlavors {}` is absent, each build type stands alone as a variant.
+///
+/// Multiple flavor dimensions are not yet supported: all flavors must share
+/// the same `dimension`. The cartesian product crosses every build type with
+/// every flavor regardless of dimension value.
 ///
 /// Each variant's `minSdk` is the base `android.minSdk` overridden by the
 /// flavor's `minSdk` when present. The `applicationIdSuffix` comes from the
@@ -557,7 +564,13 @@ fn compute_variants(config: &serde_json::Value) -> Result<Vec<Variant>, String> 
                         return Err(format!("flavor '{name}' is missing a 'dimension' key"));
                     }
                 };
-                let min_sdk = block_obj.get("minSdk").and_then(Value::as_i64);
+                let min_sdk = match block_obj.get("minSdk") {
+                    Some(v) => Some(
+                        v.as_i64()
+                            .ok_or_else(|| format!("flavor '{name}' minSdk must be an integer"))?,
+                    ),
+                    None => None,
+                };
                 let application_id_suffix = block_obj
                     .get("applicationIdSuffix")
                     .and_then(Value::as_str)
@@ -590,8 +603,8 @@ fn compute_variants(config: &serde_json::Value) -> Result<Vec<Variant>, String> 
         // No flavors: each build type is a standalone variant.
         for bt in &build_type_names {
             let name = to_pascal_case(bt);
-            let variant_dir = bt.clone();
-            let apk_filename = format!("app-{bt}.apk");
+            let variant_dir = to_pascal_case(bt).to_lowercase();
+            let apk_filename = format!("app-{variant_dir}.apk");
             variants.push(Variant {
                 name,
                 min_sdk: base_min_sdk,

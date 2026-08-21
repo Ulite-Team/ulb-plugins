@@ -156,6 +156,12 @@ signing {
 }
 ```
 
+**Security note:** passwords declared in `signing {}` are written to
+plaintext files (`ks-password.txt`, `key-password.txt`) in the build
+directory. Use `env()` to pull values from environment variables rather
+than embedding them in source-controlled files. The build directory
+should be in `.gitignore`.
+
 ## Toolchain discovery
 
 `configure` performs the discovery the packaging tasks consume, and fails
@@ -216,6 +222,12 @@ deliberately **not** an input: it is a large, externally-fixed artifact
 the build never modifies, and hashing it on every run would buy nothing —
 a change of SDK root already changes the configuration hash, which reruns
 the graph.
+
+**Known limitation:** the host fingerprints declared task inputs and
+outputs, but does not verify output existence on disk. If an output is
+deleted externally (e.g. `rm -rf build/`), the task is still considered
+UP-TO-DATE until an input changes. A full clean requires deleting the
+fingerprint store (`.uliab/state.json`).
 
 `--release 17` is pinned on the javac invocation because d8 rejects class
 files newer than its supported range; pinning keeps the output identical

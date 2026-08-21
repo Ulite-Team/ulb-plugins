@@ -1308,4 +1308,20 @@ mod tests {
         let error = compute_variants(&config).expect_err("missing dimension");
         assert!(error.contains("dimension"), "{error}");
     }
+
+    #[test]
+    fn compute_variants_flavor_non_integer_min_sdk_is_error() {
+        let config = json!({
+            "android": { "compileSdk": 36, "minSdk": 21 },
+            "productFlavors": {
+                "dimension": "tier",
+                "free": { "minSdk": "24" }
+            }
+        });
+        let error = compute_variants(&config).expect_err("non-integer minSdk");
+        assert!(
+            error.contains("minSdk") && error.contains("integer"),
+            "{error}"
+        );
+    }
 }

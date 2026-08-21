@@ -95,16 +95,18 @@ shrinking are deferred):
 ### `productFlavors {}`
 
 The `productFlavors {}` block declares flavor dimensions and flavor
-blocks:
+blocks. Only a single dimension is supported; all flavors must share the
+same dimension. The variant matrix is the cartesian product of every
+build type with every flavor, regardless of dimension value.
 
-- `dimension "tier"` (pair statement) declares a flavor dimension.
+- `dimension "tier"` (pair statement) declares the flavor dimension.
 - Flavor blocks (`free { }`, `paid { }`) may carry any of:
 
 | Key | Type | Meaning |
 |---|---|---|
-| `dimension` | string | which dimension this flavor belongs to; optional when exactly one dimension is declared |
+| `dimension` | string | which dimension this flavor belongs to (optional when exactly one dimension is declared) |
 | `applicationIdSuffix` | string | appended to the namespace as `--rename-manifest-package` on `aapt2 link` |
-| `minSdk` | number | flavor-specific floor, overriding `android.minSdk` |
+| `minSdk` | integer | flavor-specific floor, overriding `android.minSdk`; must be an integer |
 
 Example with flavors:
 

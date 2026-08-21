@@ -51,11 +51,13 @@
 //!   `classes*.dex` d8 emitted (a module that overflows one dex file yields
 //!   `classes2.dex`, `classes3.dex`, ...) onto the resources the
 //!   `prepareApk` copy placed in the apk.
+//! - `signApk` (when `signing {}` is present) — `apksigner sign` with
+//!   passwords read from temp files, avoiding password arguments on the
+//!   command line.
 //!
 //! Task inputs are the source files and the resource directory, so the
 //! host's fingerprinting leaves a task alone until its own sources change;
-//! the platform jar is deliberately not an input (it is a large,
-//! externally-fixed artifact the build never modifies). Consumed keys are
+//! the platform jar is deliberately not an input. Consumed keys are
 //! documented in `docs/android-plugin.md` (Uliab/docs/architecture.md
 //! §5.2).
 
@@ -96,6 +98,7 @@ mod bindings {
                     "java".to_string(),
                     "mkdir".to_string(),
                     "cp".to_string(),
+                    "apksigner".to_string(),
                 ],
             }
         }
@@ -285,6 +288,100 @@ mod bindings {
                 package_args(std::path::Path::new(&apk), &dex_dir),
             )?;
 
+            // APK signing: when the module's `signing {}` block is present,
+            // write the passwords to temp files and register a `signApk`
+            // task that invokes `apksigner` with `--ks-pass file:`/
+            // `--key-pass file:` (avoids passwords on the command line).
+            if let Some(signing) = config.get("signing") {
+                let store_file = signing
+                    .get("storeFile")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        "the 'signing' block is missing 'storeFile'".to_owned()
+                    })?;
+                let store_password = signing
+                    .get("storePassword")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        "the 'signing' block is missing 'storePassword'".to_owned()
+                    })?;
+                let key_alias = signing
+                    .get("keyAlias")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        "the 'signing' block is missing 'keyAlias'".to_owned()
+                    })?;
+                let key_password = signing
+                    .get("keyPassword")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        "the 'signing' block is missing 'keyPassword'".to_owned()
+                    })?;
+
+                let keystore = resolve_path(project_dir, store_file);
+                let ks_password_file =
+                    build_dir.join("ks-password.txt").to_string_lossy().into_owned();
+                let key_password_file =
+                    build_dir.join("key-password.txt").to_string_lossy().into_owned();
+
+                // Write the passwords to files so `apksigner` can read
+                // them via `--ks-pass file:` / `--key-pass file:`.
+                let write_task_name = "writeSigningPasswords";
+                task_registrar::register_task(&Task {
+                    name: write_task_name.to_owned(),
+                    inputs: vec![],
+                    outputs: vec![
+                        ks_password_file.clone(),
+                        key_password_file.clone(),
+                    ],
+                    depends_on: vec![],
+                    action: Action::WriteFile(write_file_args(
+                        &ks_password_file,
+                        store_password,
+                    )),
+                })?;
+                task_registrar::register_task(&Task {
+                    name: "writeSigningKeyPassword".to_owned(),
+                    inputs: vec![],
+                    outputs: vec![key_password_file.clone()],
+                    depends_on: vec![],
+                    action: Action::WriteFile(write_file_args(
+                        &key_password_file,
+                        key_password,
+                    )),
+                })?;
+
+                run_tool_task(
+                    "signApk",
+                    vec![
+                        apk.clone(),
+                        keystore.clone(),
+                        ks_password_file.clone(),
+                        key_password_file.clone(),
+                    ],
+                    vec![apk.clone()],
+                    vec![
+                        "packageApk".to_owned(),
+                        write_task_name.to_owned(),
+                        "writeSigningKeyPassword".to_owned(),
+                    ],
+                    AllowlistedTool::Apksigner,
+                    vec![
+                        build_tools.to_string_lossy().into_owned(),
+                        "sign".to_owned(),
+                        "--ks".to_owned(),
+                        keystore,
+                        "--ks-key-alias".to_owned(),
+                        key_alias.to_owned(),
+                        "--ks-pass".to_owned(),
+                        format!("file:{ks_password_file}"),
+                        "--key-pass".to_owned(),
+                        format!("file:{key_password_file}"),
+                        apk,
+                    ],
+                )?;
+            }
+
             Ok(())
         }
 
@@ -320,6 +417,14 @@ mod bindings {
                 cwd: ".".to_owned(),
             }),
         })
+    }
+
+    /// Builds a `write-file` action for the given path and contents.
+    fn write_file_args(path: &str, contents: &str) -> task_registrar::WriteFileArgs {
+        task_registrar::WriteFileArgs {
+            path: path.to_owned(),
+            contents: contents.to_owned(),
+        }
     }
 
     // The export generates wasm component symbols (`export_name` with a

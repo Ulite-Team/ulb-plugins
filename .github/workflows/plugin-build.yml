@@ -22,7 +22,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
-          ref: feat/multi-module-and-signing
+          ref: feat/build-variants
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -66,7 +66,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
-          ref: feat/multi-module-and-signing
+          ref: feat/build-variants
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -138,7 +138,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
-          ref: feat/multi-module-and-signing
+          ref: feat/build-variants
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -299,7 +299,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
-          ref: feat/multi-module-and-signing
+          ref: feat/build-variants
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -422,7 +422,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
-          ref: feat/multi-module-and-signing
+          ref: feat/build-variants
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -551,7 +551,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
-          ref: feat/multi-module-and-signing
+          ref: feat/build-variants
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -664,7 +664,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
-          ref: feat/multi-module-and-signing
+          ref: feat/build-variants
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 

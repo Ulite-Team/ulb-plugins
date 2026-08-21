@@ -788,12 +788,12 @@ jobs:
           grep -q '18 ran, 0 up-to-date' <<<"$first"
           # The apk is complete: manifest, merged resources, resource table,
           # and the dex grafted onto the aapt2 output.
-          unzip -l /tmp/android/build/debug/app-debug.apk > /tmp/android/apk.list
+          unzip -l /tmp/android/build/android/debug/app-debug.apk > /tmp/android/apk.list
           grep -q 'AndroidManifest.xml' /tmp/android/apk.list
           grep -q 'res/layout/activity_main.xml' /tmp/android/apk.list
           grep -q 'resources.arsc' /tmp/android/apk.list
           grep -q 'classes.dex' /tmp/android/apk.list
-          test -f /tmp/android/build/debug/R/com/example/ulite/R.java
+          test -f /tmp/android/build/android/debug/R/com/example/ulite/R.java
           # An unchanged build from another working directory is fully
           # up-to-date: derived paths resolve against the injected
           # projectDir, never the invocation directory.

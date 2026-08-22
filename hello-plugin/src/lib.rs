@@ -40,6 +40,9 @@ mod bindings {
                 abi_version: ulb_plugin_sdk::ABI_VERSION.to_string(),
                 // This plugin registers no tasks, so it declares no tools.
                 tools: Vec::new(),
+                // It also stands alone: no other plugin is required at
+                // configure time.
+                dependencies: Vec::new(),
             }
         }
 

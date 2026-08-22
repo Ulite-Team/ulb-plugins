@@ -11,11 +11,10 @@ Java, Kotlin, and Android knowledge lives here.
 
 | Plugin | Version | What it does |
 |---|---|---|
-| `ulite/hello` | 0.4.0 | The minimal plugin: establishes the build/test path, echoes its input under the host |
-| `ulite/jvm` | 0.5.0 | Compiles a module's Java/Kotlin sources, packages a jar, compiles and runs tests (JUnit 4/5), and runs the KSP2 tool over Kotlin sources |
-
-`ulite/android` and `ulite/kmp` are the roadmap; they will follow the same
-shape as `ulite/jvm`.
+| `ulite/hello` | 0.5.0 | The minimal plugin: establishes the build/test path, echoes its input under the host |
+| `ulite/jvm` | 0.6.0 | Compiles a module's Java/Kotlin sources, packages a jar, compiles and runs tests (JUnit 4/5), and runs the KSP2 tool over Kotlin sources |
+| `ulite/android` | 0.3.0 | Discovers the Android SDK and compiles a module's Java sources and resources into per-variant APKs |
+| `ulite/kmp` | 0.2.0 | Compiles a Kotlin multiplatform module's shared and jvm source sets into a jar |
 
 ## Repository layout
 

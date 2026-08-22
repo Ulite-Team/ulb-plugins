@@ -106,6 +106,9 @@ mod bindings {
                     "cp".to_string(),
                     "apksigner".to_string(),
                 ],
+                // The Android toolchain is self-contained; no other plugin
+                // is required at configure time.
+                dependencies: Vec::new(),
             }
         }
 

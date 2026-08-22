@@ -237,4 +237,4 @@ regardless of the JDK the host runs.
 
 The plugin declares `javac`, `aapt2`, `jar`, `java`, `mkdir`, `cp`, and
 `apksigner` as the tools of its run-tool tasks, per the host's
-manifest-declared-tools check. It reports ABI `0.6`.
+manifest-declared-tools check. It reports ABI `0.7`.

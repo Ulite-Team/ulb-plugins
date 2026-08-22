@@ -2,15 +2,16 @@
 
 ## Workspace
 
-A Cargo workspace (`resolver = "2"`, edition 2024) with three members:
+A Cargo workspace (`resolver = "2"`, edition 2024) with four members:
 
 | Crate | Plugin | Job |
 |---|---|---|
-| `hello-plugin` (0.4.0) | `ulite/hello` | Minimal world implementation; establishes the build/test path |
-| `jvm-plugin` (0.5.0) | `ulite/jvm` | Compile Java/Kotlin, package a jar, run tests, run KSP2 |
-| `android-plugin` (0.1.0) | `ulite/android` | Discover the Android SDK toolchain; compile against the platform jar |
+| `hello-plugin` (0.5.0) | `ulite/hello` | Minimal world implementation; establishes the build/test path |
+| `jvm-plugin` (0.6.0) | `ulite/jvm` | Compile Java/Kotlin, package a jar, run tests, run KSP2 |
+| `android-plugin` (0.3.0) | `ulite/android` | Discover the Android SDK toolchain; compile against the platform jar |
+| `kmp-plugin` (0.2.0) | `ulite/kmp` | Compile a Kotlin multiplatform module's shared and jvm source sets into a jar |
 
-Both are `cdylib` crates, depend on `ulb-plugin-sdk` by path
+All are `cdylib` crates, depend on `ulb-plugin-sdk` by path
 (`../../Uliab/crates/ulb-plugin-sdk`), and share the workspace's
 `unsafe_code = "deny"` lint. All Rust code is GPL-3.0 (the SDK itself is
 MIT and lives in the Uliab repo).
@@ -56,7 +57,7 @@ guest filesystem is otherwise empty.
    registry `index.json` gains a version row pointing at it
    ([registry.md](registry.md)).
 4. **Resolve** — a `libs.ulb` `plugins {}` table declares
-   `"ulite/jvm" @ "0.5.0"`; the host's registry client downloads the
+   `"ulite/jvm" @ "0.6.0"`; the host's registry client downloads the
    artifact and verifies its manifest against the index row.
 5. **Configure** — the host instantiates the component, checks the
    manifest's `abi-version`, and calls `configure(module_config_json)`.

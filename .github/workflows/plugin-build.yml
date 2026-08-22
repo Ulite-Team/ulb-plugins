@@ -1034,7 +1034,7 @@ jobs:
           }
           ULB
           printf 'plugins {\n  android = "ulite/android" @ "0.3.0"\n}\n' > /tmp/android-kt/libs.ulb
-          cp ../ulb-plugins/target/wasm32-wasip2/release/android_plugin.wasm /tmp/android-kt/android_plugin.wasm
+          cp "$GITHUB_WORKSPACE/ulb-plugins/target/wasm32-wasip2/release/android_plugin.wasm" /tmp/android-kt/android_plugin.wasm
           cat > /tmp/android-kt/index.json <<'JSON'
           {
             "schema_version": 1,
@@ -1062,3 +1062,5 @@ jobs:
           grep -q 'AndroidManifest.xml' /tmp/android-kt/apk.list
           grep -q 'classes.dex' /tmp/android-kt/apk.list
           grep -q 'resources.arsc' /tmp/android-kt/apk.list
+          unzip -p /tmp/android-kt/build/android/debug/app-debug.apk classes.dex \
+            | strings | grep -q 'Lcom/example/ulite/Main;'

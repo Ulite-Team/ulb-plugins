@@ -795,11 +795,10 @@ jobs:
             exit 1
           fi
           grep -q 'unresolved reference' /tmp/kmp/toplevel.log
-          # An unsupported source set fails configure with a named error.
+          # An unsupported entry in the kmp block is rejected.
           cat > /tmp/kmp/build.ulb <<'ULB'
           kmp {
-            androidMain {
-              sources = ["src/jvmMain/Helper.java"]
+            foo {
             }
             jvm {
               classesDir = "build/classes"
@@ -808,10 +807,10 @@ jobs:
           }
           ULB
           if build > /tmp/kmp/androidset.log 2>&1; then
-            echo "an unsupported source set did not fail the build"
+            echo "an unsupported entry did not fail the build"
             exit 1
           fi
-          grep -q "the 'androidMain' source set is not compiled by the jvm target" /tmp/kmp/androidset.log
+          grep -q "the 'kmp.foo' entry is neither a source set" /tmp/kmp/androidset.log
 
   android-build:
     runs-on: ubuntu-latest

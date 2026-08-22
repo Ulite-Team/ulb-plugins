@@ -70,6 +70,13 @@
             "max": "0.7"
           },
           "artifact_url": "https://github.com/Ulite-Team/ulb-plugins/releases/download/kmp-plugin-v0.2.0/kmp_plugin.wasm"
+        },
+        "0.3.0": {
+          "abi": {
+            "min": "0.7",
+            "max": "0.7"
+          },
+          "artifact_url": "https://github.com/Ulite-Team/ulb-plugins/releases/download/kmp-plugin-v0.3.0/kmp_plugin.wasm"
         }
       }
     }

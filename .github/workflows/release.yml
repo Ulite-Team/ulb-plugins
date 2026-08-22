@@ -60,4 +60,4 @@ jobs:
           publish hello-plugin-v0.5.0 hello_plugin.wasm
           publish jvm-plugin-v0.6.0 jvm_plugin.wasm
           publish android-plugin-v0.3.0 android_plugin.wasm
-          publish kmp-plugin-v0.2.0 kmp_plugin.wasm
+          publish kmp-plugin-v0.3.0 kmp_plugin.wasm

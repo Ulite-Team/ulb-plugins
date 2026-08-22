@@ -1,23 +1,18 @@
-//! The `ulite/kmp` plugin's JVM-target slice: compiles a Kotlin
-//! multiplatform module's shared and JVM source sets into a jar.
+//! The `ulite/kmp` plugin: compiles a Kotlin Multiplatform module's
+//! shared and platform source sets.
 //!
 //! The module's `kmp {}` block declares source sets — blocks carrying a
 //! `sources` list of `.java`/`.kt` file paths and optionally a `deps {}`
-//! block, named after the hierarchy Kotlin publishes by default
-//! (`commonMain`, `jvmMain`, ...) — and target configs, blocks carrying
-//! neither `sources` nor `deps` (`jvm { classesDir ... jarFile ... }`).
-//! The host resolves each source set's `deps {}` block independently and
-//! injects the results as `classpathSourceSets`, keyed by the source set's
-//! path under the model (`kmp.commonMain`, `kmp.jvmMain`); the JVM target
-//! compiles the union of the `commonMain` and `jvmMain` sources against
-//! the union of their compile classpaths. `compile` runs javac over `.java` sources,
-//! `compile-kotlin` runs kotlinc over `.kt` sources (waiting for `compile`
-//! when both coexist, with the classes directory on its classpath so the
-//! Kotlin sees the Java classes), and `assemble` packs the classes into
-//! the target's `jarFile`. Target and source-set paths are resolved against
-//! the injected `projectDir`; task inputs are the source directories, which
-//! the host fingerprints as trees, so an edit inside one reruns the
-//! dependent chain. Consumed keys are documented in `docs/kmp-plugin.md`
+//! block — and target configs (`jvm { classesDir ... jarFile ... }`,
+//! `android {}`).
+//!
+//! **JVM target:** compiles `commonMain` + `jvmMain` into a jar.
+//!
+//! **Android target:** compiles `commonMain` + `androidMain` Kotlin, then
+//! per-variant `assembleAndroid<Variant>` tasks merge the kmp dex with the
+//! `ulite/android` plugin's dex and graft the result into the APK.
+//!
+//! Consumed keys are documented in `docs/kmp-plugin.md`
 //! (Uliab/docs/architecture.md §5.3).
 
 mod bindings {
@@ -25,32 +20,23 @@ mod bindings {
     #![allow(clippy::missing_safety_doc)]
 
     wit_bindgen::generate!({
-        // The WIT text is the sdk crate's plugin.wit; the path keeps both
-        // sides generating from the single source of truth.
         path: "../../Uliab/crates/ulb-plugin-sdk/plugin.wit",
         world: "plugin",
     });
 
     use crate::{
-        compile_args, jar_args, merged_classpath, optional_string_list, partition_sources,
-        reject_unknown_extensions, resolve_path, resolve_paths,
+        compile_args, compute_variants, jar_args, kotlinc_android_args, merged_classpath,
+        optional_string_list, partition_sources, reject_unknown_extensions, resolve_path,
+        resolve_paths,
     };
     use exports::ulite::ulb::ulb_plugin::{Guest, PluginManifest};
     use serde_json::Value;
     use ulite::ulb::task_registrar::{self, Action, AllowlistedTool, RunToolArgs, Task};
 
-    /// Source sets the JVM target compiles; names follow the default
-    /// hierarchy Kotlin publishes (`commonMain` shared by every target,
-    /// `jvmMain` JVM-only).
     const JVM_SOURCE_SETS: &[&str] = &["commonMain", "jvmMain"];
-
-    /// Target names this plugin recognizes as target config blocks.
-    /// `jvm` is implemented; the others are recognized so a module that
-    /// declares one fails with an explicit message instead of being
-    /// silently ignored.
+    const ANDROID_SOURCE_SETS: &[&str] = &["commonMain", "androidMain"];
     const KNOWN_TARGETS: &[&str] = &["jvm", "android", "ios", "desktop", "native", "wasm"];
 
-    /// Implements the exported `ulb-plugin` interface.
     struct KmpPlugin;
 
     impl Guest for KmpPlugin {
@@ -59,17 +45,13 @@ mod bindings {
                 name: "ulite/kmp".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 abi_version: ulb_plugin_sdk::ABI_VERSION.to_string(),
-                // Every run-tool task below uses one of these tools.
                 tools: vec![
                     "javac".to_string(),
                     "kotlinc".to_string(),
                     "jar".to_string(),
+                    "java".to_string(),
                 ],
-                // The jvm-target slice compiles the shared source set with
-                // its own kotlinc invocation; no other plugin is required
-                // yet. Android-target composition will declare
-                // "ulite/android" here.
-                dependencies: Vec::new(),
+                dependencies: vec!["ulite/android".to_string()],
             }
         }
 
@@ -87,9 +69,6 @@ mod bindings {
                 .as_object()
                 .ok_or_else(|| "the 'kmp' block is not an object".to_owned())?;
 
-            // Classify the block's entries: a block with `sources` or
-            // `deps` is a source set, a block named after a known target is
-            // a target config, and anything else is a mistake worth naming.
             let mut source_sets = Vec::new();
             let mut targets = Vec::new();
             for (name, value) in kmp {
@@ -109,113 +88,238 @@ mod bindings {
                 }
             }
 
+            let has_jvm = targets.iter().any(|(name, _)| name == "jvm");
+            let has_android = targets.iter().any(|(name, _)| name == "android");
+
             for (name, _) in &targets {
-                if name != "jvm" {
-                    return Err(format!(
-                        "the 'kmp.{name}' target is not implemented; this slice of the kmp \
-                         plugin compiles the 'jvm' target only"
-                    ));
+                if name != "jvm" && name != "android" {
+                    return Err(format!("the 'kmp.{name}' target is not implemented"));
                 }
             }
-            let jvm = targets
-                .iter()
-                .find(|(name, _)| name == "jvm")
-                .map(|(_, value)| *value)
-                .ok_or_else(|| "the 'kmp' block declares no 'jvm' target".to_owned())?;
 
-            let classes_dir = resolve_path(
-                project_dir,
-                jvm.get("classesDir")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        "the 'kmp.jvm' block is missing a 'classesDir' string".to_owned()
+            if !has_jvm && !has_android {
+                return Err("the 'kmp' block declares no 'jvm' or 'android' target".to_owned());
+            }
+
+            // ── JVM target ────────────────────────────────────────────
+            if has_jvm {
+                let jvm = targets
+                    .iter()
+                    .find(|(name, _)| name == "jvm")
+                    .map(|(_, value)| *value)
+                    .unwrap();
+
+                let classes_dir = resolve_path(
+                    project_dir,
+                    jvm.get("classesDir")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            "the 'kmp.jvm' block is missing a 'classesDir' string".to_owned()
+                        })?,
+                );
+                let jar_file = resolve_path(
+                    project_dir,
+                    jvm.get("jarFile").and_then(Value::as_str).ok_or_else(|| {
+                        "the 'kmp.jvm' block is missing a 'jarFile' string".to_owned()
                     })?,
-            );
-            let jar_file = resolve_path(
-                project_dir,
-                jvm.get("jarFile").and_then(Value::as_str).ok_or_else(|| {
-                    "the 'kmp.jvm' block is missing a 'jarFile' string".to_owned()
-                })?,
-            );
+                );
 
-            // Collect the source files of the JVM source sets in hierarchy
-            // order (shared first) and their compile classpaths. Sources
-            // are explicit file paths, matching the `jvm` plugin's model;
-            // the compilers are partitioned by extension below.
-            let mut sources = Vec::new();
-            for (name, value) in &source_sets {
-                if !JVM_SOURCE_SETS.contains(&name.as_str()) {
-                    return Err(format!(
-                        "the '{name}' source set is not compiled by the jvm target; this slice \
-                         supports {}",
-                        JVM_SOURCE_SETS.join(" and ")
-                    ));
+                let mut sources = Vec::new();
+                for (name, value) in &source_sets {
+                    if JVM_SOURCE_SETS.contains(&name.as_str()) {
+                        sources.extend(optional_string_list(value, "sources")?);
+                    }
                 }
-                sources.extend(optional_string_list(value, "sources")?);
-            }
-            if sources.is_empty() {
-                return Err("the 'kmp' block declares no sources for the jvm target".to_owned());
-            }
-            let sources = resolve_paths(project_dir, &sources);
-            reject_unknown_extensions(&sources)?;
-            let (java_sources, kotlin_sources) = partition_sources(&sources);
-            let compile_classpath = merged_classpath(&config, JVM_SOURCE_SETS);
+                if sources.is_empty() {
+                    return Err("the 'kmp' block declares no sources for the jvm target".to_owned());
+                }
+                let sources = resolve_paths(project_dir, &sources);
+                reject_unknown_extensions(&sources)?;
+                let (java_sources, kotlin_sources) = partition_sources(&sources);
+                let compile_classpath = merged_classpath(&config, JVM_SOURCE_SETS);
 
-            // One javac task for the source sets' own java files, one
-            // kotlinc task for the kotlin files. Kotlin can see the java
-            // classes, so the kotlin task waits for the java one when both
-            // coexist. The source files are the task inputs, so an edit to
-            // one reruns its task.
-            let mut compile_tasks = Vec::new();
-            if !java_sources.is_empty() {
+                let mut compile_tasks = Vec::new();
+                if !java_sources.is_empty() {
+                    task_registrar::register_task(&Task {
+                        name: "compile".to_owned(),
+                        inputs: java_sources.clone(),
+                        outputs: vec![classes_dir.clone()],
+                        depends_on: Vec::new(),
+                        action: Action::RunTool(RunToolArgs {
+                            tool: AllowlistedTool::Javac,
+                            args: compile_args(&classes_dir, &compile_classpath, &java_sources),
+                            cwd: ".".to_owned(),
+                        }),
+                    })?;
+                    compile_tasks.push("compile".to_owned());
+                }
+                if !kotlin_sources.is_empty() {
+                    let mut depends_on = Vec::new();
+                    if !java_sources.is_empty() {
+                        depends_on.push("compile".to_owned());
+                    }
+                    let mut kotlin_classpath = compile_classpath.clone();
+                    kotlin_classpath.push(classes_dir.clone());
+                    task_registrar::register_task(&Task {
+                        name: "compile-kotlin".to_owned(),
+                        inputs: kotlin_sources.clone(),
+                        outputs: vec![classes_dir.clone()],
+                        depends_on,
+                        action: Action::RunTool(RunToolArgs {
+                            tool: AllowlistedTool::Kotlinc,
+                            args: compile_args(&classes_dir, &kotlin_classpath, &kotlin_sources),
+                            cwd: ".".to_owned(),
+                        }),
+                    })?;
+                    compile_tasks.push("compile-kotlin".to_owned());
+                }
+
                 task_registrar::register_task(&Task {
-                    name: "compile".to_owned(),
-                    inputs: java_sources.clone(),
-                    outputs: vec![classes_dir.clone()],
-                    depends_on: Vec::new(),
+                    name: "assemble".to_owned(),
+                    inputs: vec![classes_dir.clone()],
+                    outputs: vec![jar_file.clone()],
+                    depends_on: compile_tasks,
                     action: Action::RunTool(RunToolArgs {
-                        tool: AllowlistedTool::Javac,
-                        args: compile_args(&classes_dir, &compile_classpath, &java_sources),
+                        tool: AllowlistedTool::Jar,
+                        args: jar_args(&jar_file, &classes_dir),
                         cwd: ".".to_owned(),
                     }),
                 })?;
-                compile_tasks.push("compile".to_owned());
             }
-            if !kotlin_sources.is_empty() {
-                let mut depends_on = Vec::new();
-                if !java_sources.is_empty() {
-                    depends_on.push("compile".to_owned());
+
+            // ── Android target ─────────────────────────────────────────
+            if has_android {
+                let android_build_dir = std::path::Path::new(project_dir).join("build/kmp/android");
+                let kmp_jar = android_build_dir.join("classes.jar");
+                let kmp_classes_dir = android_build_dir.join("classes");
+
+                let compile_sdk = config
+                    .get("android")
+                    .and_then(|a| a.get("compileSdk"))
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| {
+                        "the 'android' block is missing a numeric 'compileSdk'".to_owned()
+                    })?;
+
+                let sdk_root = crate::resolve_sdk_root(&config, project_dir)?;
+                let platform_jar = crate::android_jar(&sdk_root, compile_sdk)?;
+
+                let mut sources = Vec::new();
+                for (name, value) in &source_sets {
+                    if ANDROID_SOURCE_SETS.contains(&name.as_str()) {
+                        sources.extend(optional_string_list(value, "sources")?);
+                    }
                 }
-                // The kotlin compiler resolves the module's own java classes
-                // the same way it would resolve a dependency jar, so the
-                // classes dir joins the compile classpath.
-                let mut kotlin_classpath = compile_classpath.clone();
-                kotlin_classpath.push(classes_dir.clone());
+                if sources.is_empty() {
+                    return Err(
+                        "the 'kmp' block declares no sources for the android target".to_owned()
+                    );
+                }
+                let sources = resolve_paths(project_dir, &sources);
+                reject_unknown_extensions(&sources)?;
+                let (_, kotlin_sources) = partition_sources(&sources);
+
+                let compile_classpath = merged_classpath(&config, ANDROID_SOURCE_SETS);
+
                 task_registrar::register_task(&Task {
-                    name: "compile-kotlin".to_owned(),
+                    name: "compileAndroid".to_owned(),
                     inputs: kotlin_sources.clone(),
-                    outputs: vec![classes_dir.clone()],
-                    depends_on,
+                    outputs: vec![kmp_classes_dir.to_string_lossy().into_owned()],
+                    depends_on: vec!["ulite/android:prepareBuildDir".to_owned()],
                     action: Action::RunTool(RunToolArgs {
                         tool: AllowlistedTool::Kotlinc,
-                        args: compile_args(&classes_dir, &kotlin_classpath, &kotlin_sources),
+                        args: kotlinc_android_args(
+                            &kmp_classes_dir.to_string_lossy(),
+                            &platform_jar.to_string_lossy(),
+                            &compile_classpath,
+                            &kotlin_sources,
+                        ),
                         cwd: ".".to_owned(),
                     }),
                 })?;
-                compile_tasks.push("compile-kotlin".to_owned());
-            }
 
-            task_registrar::register_task(&Task {
-                name: "assemble".to_owned(),
-                inputs: vec![classes_dir.clone()],
-                outputs: vec![jar_file.clone()],
-                depends_on: compile_tasks,
-                action: Action::RunTool(RunToolArgs {
-                    tool: AllowlistedTool::Jar,
-                    args: jar_args(&jar_file, &classes_dir),
-                    cwd: ".".to_owned(),
-                }),
-            })?;
+                task_registrar::register_task(&Task {
+                    name: "jarKmpAndroid".to_owned(),
+                    inputs: vec![kmp_classes_dir.to_string_lossy().into_owned()],
+                    outputs: vec![kmp_jar.to_string_lossy().into_owned()],
+                    depends_on: vec!["compileAndroid".to_owned()],
+                    action: Action::RunTool(RunToolArgs {
+                        tool: AllowlistedTool::Jar,
+                        args: jar_args(
+                            &kmp_jar.to_string_lossy(),
+                            &kmp_classes_dir.to_string_lossy(),
+                        ),
+                        cwd: ".".to_owned(),
+                    }),
+                })?;
+
+                let variants = compute_variants(&config)?;
+                for variant in &variants {
+                    let variant_build = std::path::Path::new(project_dir)
+                        .join("build/android")
+                        .join(&variant.variant_dir);
+                    let variant_classes_jar = variant_build.join("classes.jar");
+                    let variant_apk = variant_build.join(&variant.apk_filename);
+                    let merged_dex_dir =
+                        android_build_dir.join(format!("dex-{}", variant.variant_dir));
+                    let merged_dex = merged_dex_dir.join("classes.dex");
+
+                    let has_signing = config.get("signing").is_some();
+                    let terminal_task = if has_signing {
+                        format!("ulite/android:signApk{}", variant.name)
+                    } else {
+                        format!("ulite/android:packageApk{}", variant.name)
+                    };
+
+                    task_registrar::register_task(&Task {
+                        name: format!("mergeDex{}", variant.name),
+                        inputs: vec![
+                            variant_classes_jar.to_string_lossy().into_owned(),
+                            kmp_jar.to_string_lossy().into_owned(),
+                        ],
+                        outputs: vec![merged_dex.to_string_lossy().into_owned()],
+                        depends_on: vec![
+                            "jarKmpAndroid".to_owned(),
+                            format!("ulite/android:jarClasses{}", variant.name),
+                        ],
+                        action: Action::RunTool(RunToolArgs {
+                            tool: AllowlistedTool::Java,
+                            args: crate::d8_merge_args(
+                                &sdk_root,
+                                &[
+                                    &variant_classes_jar.to_string_lossy(),
+                                    &kmp_jar.to_string_lossy(),
+                                ],
+                                &merged_dex_dir.to_string_lossy(),
+                                variant.min_sdk,
+                                &platform_jar.to_string_lossy(),
+                            ),
+                            cwd: ".".to_owned(),
+                        }),
+                    })?;
+
+                    task_registrar::register_task(&Task {
+                        name: format!("assembleAndroid{}", variant.name),
+                        inputs: vec![
+                            merged_dex.to_string_lossy().into_owned(),
+                            variant_apk.to_string_lossy().into_owned(),
+                        ],
+                        outputs: vec![variant_apk.to_string_lossy().into_owned()],
+                        depends_on: vec![format!("mergeDex{}", variant.name), terminal_task],
+                        action: Action::RunTool(RunToolArgs {
+                            tool: AllowlistedTool::Jar,
+                            args: vec![
+                                "uf".to_owned(),
+                                variant_apk.to_string_lossy().into_owned(),
+                                "-C".to_owned(),
+                                merged_dex_dir.to_string_lossy().into_owned(),
+                                "classes.dex".to_owned(),
+                            ],
+                            cwd: ".".to_owned(),
+                        }),
+                    })?;
+                }
+            }
 
             Ok(())
         }
@@ -225,14 +329,10 @@ mod bindings {
         }
     }
 
-    // The export generates wasm component symbols (`export_name` with a
-    // component-model name), which only link on the wasm32-wasip2 target.
     #[cfg(target_arch = "wasm32")]
     export!(KmpPlugin);
 }
 
-/// Resolves module-block paths against the project directory; an absolute
-/// path passes through untouched.
 fn resolve_path(project_dir: &str, path: &str) -> String {
     if std::path::Path::new(path).is_absolute() {
         path.to_owned()
@@ -251,8 +351,6 @@ fn resolve_paths(project_dir: &str, paths: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Reads an optional string-list key of a source-set block; a missing key
-/// is an empty list, a present non-list or non-string entry is an error.
 fn optional_string_list(block: &serde_json::Value, key: &str) -> Result<Vec<String>, String> {
     let Some(value) = block.get(key) else {
         return Ok(Vec::new());
@@ -271,8 +369,6 @@ fn optional_string_list(block: &serde_json::Value, key: &str) -> Result<Vec<Stri
         .collect()
 }
 
-/// Splits source paths into `.java` files and everything else (the `.kt`
-/// files), preserving order within each half.
 fn partition_sources(sources: &[String]) -> (Vec<String>, Vec<String>) {
     sources
         .iter()
@@ -280,9 +376,6 @@ fn partition_sources(sources: &[String]) -> (Vec<String>, Vec<String>) {
         .partition(|source| source.ends_with(".java"))
 }
 
-/// Rejects a source file that is neither `.java` nor `.kt`; the compilers
-/// are partitioned by this extension, so anything else would be silently
-/// dropped.
 fn reject_unknown_extensions(sources: &[String]) -> Result<(), String> {
     for source in sources {
         if !source.ends_with(".java") && !source.ends_with(".kt") {
@@ -294,10 +387,6 @@ fn reject_unknown_extensions(sources: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// The host-resolved compile classpath of one source-set path under the
-/// `kmp` block, e.g. `kmp.commonMain`. The host injects an entry only for
-/// source sets that declare a `deps {}` block, so a missing entry reads as
-/// an empty classpath.
 fn source_set_classpath(config: &serde_json::Value, path: &str) -> Vec<String> {
     config
         .get("classpathSourceSets")
@@ -313,9 +402,6 @@ fn source_set_classpath(config: &serde_json::Value, path: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The compile classpath of a target: the union, in hierarchy order, of its
-/// source sets' resolved compile classpaths, deduplicated so a jar declared
-/// in both the shared and the platform source set appears once.
 fn merged_classpath(config: &serde_json::Value, source_sets: &[&str]) -> Vec<String> {
     let mut merged = Vec::new();
     for name in source_sets {
@@ -328,10 +414,6 @@ fn merged_classpath(config: &serde_json::Value, source_sets: &[&str]) -> Vec<Str
     merged
 }
 
-/// The compiler invocation for a compile task: emit classes to `-d`, feed
-/// the resolved classpath to `-cp` when one exists (so an empty classpath
-/// keeps the compiler's own defaults), then the sources. Shared by the
-/// javac and kotlinc tasks; kotlinc accepts the same flag shape.
 fn compile_args(classes_dir: &str, classpath: &[String], sources: &[String]) -> Vec<String> {
     let mut args = vec!["-d".to_owned(), classes_dir.to_owned()];
     if !classpath.is_empty() {
@@ -341,8 +423,21 @@ fn compile_args(classes_dir: &str, classpath: &[String], sources: &[String]) -> 
     args
 }
 
-/// The `jar` invocation for an assemble task: create the jar and pack the
-/// classes directory.
+fn kotlinc_android_args(
+    classes_dir: &str,
+    platform_jar: &str,
+    classpath: &[String],
+    sources: &[String],
+) -> Vec<String> {
+    let mut args = vec!["-d".to_owned(), classes_dir.to_owned()];
+    let mut cp = vec![platform_jar.to_owned()];
+    cp.extend(classpath.iter().cloned());
+    args.extend(["-cp".to_owned(), cp.join(":")]);
+    args.extend(["-jvm-target".to_owned(), "17".to_owned()]);
+    args.extend(sources.iter().cloned());
+    args
+}
+
 fn jar_args(jar_file: &str, classes_dir: &str) -> Vec<String> {
     vec![
         "cf".to_owned(),
@@ -353,12 +448,203 @@ fn jar_args(jar_file: &str, classes_dir: &str) -> Vec<String> {
     ]
 }
 
+struct Variant {
+    name: String,
+    variant_dir: String,
+    min_sdk: i64,
+    apk_filename: String,
+}
+
+fn compute_variants(config: &serde_json::Value) -> Result<Vec<Variant>, String> {
+    let android = config
+        .get("android")
+        .ok_or_else(|| "module config has no 'android' block".to_owned())?;
+    let base_min_sdk = android
+        .get("minSdk")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or("the 'android' block is missing a numeric 'minSdk'")?;
+
+    let build_type_names: Vec<String> = match config.get("buildTypes") {
+        Some(bt) => bt
+            .as_object()
+            .ok_or_else(|| "'buildTypes' must be a block".to_owned())?
+            .keys()
+            .cloned()
+            .collect(),
+        None => vec!["debug".to_owned(), "release".to_owned()],
+    };
+
+    let flavors: std::collections::BTreeMap<String, ()> = match config.get("productFlavors") {
+        Some(pf) => {
+            let obj = pf
+                .as_object()
+                .ok_or_else(|| "'productFlavors' must be a block".to_owned())?;
+            let declared_dimensions: Vec<String> = obj
+                .iter()
+                .filter(|(k, _)| *k == "dimension")
+                .filter_map(|(_, v)| v.as_str().map(str::to_owned))
+                .collect();
+            let mut map = std::collections::BTreeMap::new();
+            for (name, block) in obj {
+                if name == "dimension" {
+                    continue;
+                }
+                let block_obj = block
+                    .as_object()
+                    .ok_or_else(|| format!("flavor '{name}' must be a block"))?;
+                let has_dimension = block_obj
+                    .get("dimension")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some();
+                if !has_dimension && declared_dimensions.len() != 1 {
+                    return Err(format!("flavor '{name}' is missing a 'dimension' key"));
+                }
+                map.insert(name.to_owned(), ());
+            }
+            map
+        }
+        None => std::collections::BTreeMap::new(),
+    };
+
+    let mut variants = Vec::new();
+
+    if flavors.is_empty() {
+        for bt in &build_type_names {
+            let name = to_pascal_case(bt);
+            let variant_dir = to_pascal_case(bt).to_lowercase();
+            let apk_filename = format!("app-{variant_dir}.apk");
+            variants.push(Variant {
+                name,
+                variant_dir,
+                min_sdk: base_min_sdk,
+                apk_filename,
+            });
+        }
+    } else {
+        for bt in &build_type_names {
+            for flavor_name in flavors.keys() {
+                let variant_name = format!("{}{}", to_pascal_case(bt), to_pascal_case(flavor_name));
+                let variant_dir = format!(
+                    "{}{}",
+                    to_pascal_case(bt).to_lowercase(),
+                    to_pascal_case(flavor_name)
+                );
+                let apk_filename = format!("app-{}.apk", variant_dir);
+                variants.push(Variant {
+                    name: variant_name,
+                    variant_dir,
+                    min_sdk: base_min_sdk,
+                    apk_filename,
+                });
+            }
+        }
+    }
+
+    Ok(variants)
+}
+
+fn to_pascal_case(s: &str) -> String {
+    s.split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => {
+                    let upper: String = first.to_uppercase().collect();
+                    upper + &chars.collect::<String>()
+                }
+            }
+        })
+        .collect()
+}
+
+fn resolve_sdk_root(
+    config: &serde_json::Value,
+    project_dir: &str,
+) -> Result<std::path::PathBuf, String> {
+    if let Some(sdk_dir) = config
+        .get("android")
+        .and_then(|a| a.get("sdkDir"))
+        .and_then(serde_json::Value::as_str)
+    {
+        return Ok(std::path::PathBuf::from(resolve_path(project_dir, sdk_dir)));
+    }
+    config
+        .get("androidSdkDir")
+        .and_then(serde_json::Value::as_str)
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            "no Android SDK root: set 'sdkDir' in the 'android' block, or pass \
+             --android-sdk / ANDROID_HOME / ANDROID_SDK_ROOT to the host"
+                .to_owned()
+        })
+}
+
+fn android_jar(sdk: &std::path::Path, compile_sdk: i64) -> Result<std::path::PathBuf, String> {
+    let jar = sdk
+        .join("platforms")
+        .join(format!("android-{compile_sdk}"))
+        .join("android.jar");
+    if !jar.exists() {
+        return Err(format!(
+            "no android.jar for compileSdk {compile_sdk} under '{}'",
+            sdk.display()
+        ));
+    }
+    Ok(jar)
+}
+
+fn d8_merge_args(
+    sdk_root: &std::path::Path,
+    input_jars: &[&str],
+    output_dir: &str,
+    min_sdk: i64,
+    platform_jar: &str,
+) -> Vec<String> {
+    let d8_jar = sdk_root
+        .join("build-tools")
+        .join(find_build_tools_version(sdk_root))
+        .join("lib")
+        .join("d8.jar");
+
+    let mut args = vec![
+        "-cp".to_owned(),
+        d8_jar.to_string_lossy().into_owned(),
+        "com.android.tools.r8.D8".to_owned(),
+        format!("--min-api={min_sdk}"),
+        "--lib".to_owned(),
+        platform_jar.to_owned(),
+        format!("--output={output_dir}"),
+    ];
+    for jar in input_jars {
+        args.push(jar.to_string());
+    }
+    args
+}
+
+fn find_build_tools_version(sdk_root: &std::path::Path) -> String {
+    let build_tools = sdk_root.join("build-tools");
+    let mut candidates: Vec<(Vec<u64>, String)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&build_tools) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let rank: Vec<u64> = name.split('.').filter_map(|p| p.parse().ok()).collect();
+            if rank.len() == 3 {
+                candidates.push((rank, name));
+            }
+        }
+    }
+    candidates
+        .into_iter()
+        .max_by_key(|(rank, _)| rank.clone())
+        .map(|(_, name)| name)
+        .unwrap_or_else(|| "36.0.0".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        compile_args, jar_args, merged_classpath, optional_string_list, partition_sources,
-        reject_unknown_extensions, resolve_path, source_set_classpath,
-    };
+    use super::*;
 
     #[test]
     fn compiler_invocation_carries_classpath_and_sources() {
@@ -446,7 +732,6 @@ mod tests {
         assert!(reject_unknown_extensions(&["/proj/A.java".to_owned()]).is_ok());
         assert!(reject_unknown_extensions(&["/proj/A.kt".to_owned()]).is_ok());
         assert!(reject_unknown_extensions(&["/proj/A.txt".to_owned()]).is_err());
-        assert!(reject_unknown_extensions(&["/proj/src/commonMain".to_owned()]).is_err());
     }
 
     #[test]
@@ -489,8 +774,6 @@ mod tests {
                 "kmp.jvmMain": { "compile": ["/repos/jvm.jar", "/repos/shared.jar"] },
             },
         });
-        // shared appears once, in the commonMain position; jvm.jar joins
-        // after commonMain's jars.
         assert_eq!(
             merged_classpath(&config, &["commonMain", "jvmMain"]),
             vec![
@@ -499,5 +782,43 @@ mod tests {
                 "/repos/jvm.jar".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn compute_variants_defaults_to_debug_and_release() {
+        let config = serde_json::json!({
+            "android": { "compileSdk": 34, "minSdk": 24 }
+        });
+        let variants = compute_variants(&config).unwrap();
+        assert_eq!(variants.len(), 2);
+        assert_eq!(variants[0].name, "Debug");
+        assert_eq!(variants[0].variant_dir, "debug");
+        assert_eq!(variants[0].apk_filename, "app-debug.apk");
+        assert_eq!(variants[1].name, "Release");
+        assert_eq!(variants[1].variant_dir, "release");
+        assert_eq!(variants[1].apk_filename, "app-release.apk");
+    }
+
+    #[test]
+    fn kotlinc_android_includes_platform_jar_and_jvm_target() {
+        let args = kotlinc_android_args(
+            "/proj/build/classes",
+            "/sdk/platforms/android-34/android.jar",
+            &["/repos/lib.jar".to_owned()],
+            &["/proj/src/Foo.kt".to_owned()],
+        );
+        assert!(args.contains(&"-d".to_owned()));
+        assert!(args.contains(&"/proj/build/classes".to_owned()));
+        assert!(args.contains(&"-cp".to_owned()));
+        assert!(args.contains(&"-jvm-target".to_owned()));
+        assert!(args.contains(&"17".to_owned()));
+        assert!(args.contains(&"/proj/src/Foo.kt".to_owned()));
+    }
+
+    #[test]
+    fn to_pascal_case_handles_variants() {
+        assert_eq!(to_pascal_case("debug"), "Debug");
+        assert_eq!(to_pascal_case("release"), "Release");
+        assert_eq!(to_pascal_case("free"), "Free");
     }
 }

@@ -6,7 +6,9 @@
 //! block — and target configs (`jvm { classesDir ... jarFile ... }`,
 //! `android {}`).
 //!
-//! **JVM target:** compiles `commonMain` + `jvmMain` into a jar.
+//! **JVM target:** compiles `commonMain` + `jvmMain` into a jar, with
+//! optional test support (`testClassesDir`/`testClass`/`testRunner` keys)
+//! that compiles `commonTest` + `jvmTest` sources and runs them.
 //!
 //! **Android target:** compiles `commonMain` + `androidMain` Kotlin, then
 //! per-variant `assembleAndroid<Variant>` tasks merge the kmp dex with the
@@ -27,15 +29,16 @@ mod bindings {
     });
 
     use crate::{
-        compile_args, compute_variants, jar_args, kotlinc_android_args, merged_classpath,
-        optional_string_list, partition_sources, reject_unknown_extensions, resolve_path,
-        resolve_paths,
+        TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args, compute_variants, jar_args,
+        kotlinc_android_args, merged_classpath, merged_classpath_bucket, optional_string_list,
+        partition_sources, reject_unknown_extensions, resolve_path, resolve_paths, run_test_args,
     };
     use exports::ulite::ulb::ulb_plugin::{Guest, PluginManifest};
     use serde_json::Value;
     use ulite::ulb::task_registrar::{self, Action, AllowlistedTool, RunToolArgs, Task};
 
     const JVM_SOURCE_SETS: &[&str] = &["commonMain", "jvmMain"];
+    const JVM_TEST_SOURCE_SETS: &[&str] = &["commonTest", "jvmTest"];
     const ANDROID_SOURCE_SETS: &[&str] = &["commonMain", "androidMain"];
     const KNOWN_TARGETS: &[&str] = &["jvm", "android", "ios", "desktop", "native", "wasm"];
 
@@ -181,13 +184,139 @@ mod bindings {
                     name: "assemble".to_owned(),
                     inputs: vec![classes_dir.clone()],
                     outputs: vec![jar_file.clone()],
-                    depends_on: compile_tasks,
+                    depends_on: compile_tasks.clone(),
                     action: Action::RunTool(RunToolArgs {
                         tool: AllowlistedTool::Jar,
                         args: jar_args(&jar_file, &classes_dir),
                         cwd: ".".to_owned(),
                     }),
                 })?;
+
+                // ── JVM target: tests ──────────────────────────────
+                let test_classes_dir_opt = jvm
+                    .get("testClassesDir")
+                    .and_then(Value::as_str)
+                    .map(|dir| resolve_path(project_dir, dir));
+                if let Some(test_classes_dir) = test_classes_dir_opt {
+                    let test_class = jvm
+                        .get("testClass")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    let test_runner = jvm
+                        .get("testRunner")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+
+                    if test_class.is_none() && test_runner.is_none() {
+                        return Err("the 'kmp.jvm' block has 'testClassesDir' but neither \
+                             'testClass' nor 'testRunner'"
+                            .to_owned());
+                    }
+                    if test_class.is_some() && test_runner.is_some() {
+                        return Err("the 'kmp.jvm' block specifies both 'testClass' and \
+                             'testRunner'; these are mutually exclusive"
+                            .to_owned());
+                    }
+
+                    let mut test_sources = Vec::new();
+                    for (name, value) in &source_sets {
+                        if JVM_TEST_SOURCE_SETS.contains(&name.as_str()) {
+                            test_sources.extend(optional_string_list(value, "sources")?);
+                        }
+                    }
+                    if !test_sources.is_empty() {
+                        let test_sources = resolve_paths(project_dir, &test_sources);
+                        reject_unknown_extensions(&test_sources)?;
+                    }
+
+                    let test_compile_classpath =
+                        merged_classpath_bucket(&config, JVM_TEST_SOURCE_SETS, "testCompile");
+                    let test_runtime_classpath =
+                        merged_classpath_bucket(&config, JVM_TEST_SOURCE_SETS, "testRuntime");
+
+                    let mut compile_tests_depends = compile_tasks.clone();
+                    let mut compile_test_sources = test_sources.clone();
+                    let generated_source = resolve_path(project_dir, TEST_RUNNER_SOURCE_PATH);
+
+                    if let Some(ref runner) = test_runner {
+                        if runner != "junit-platform" {
+                            return Err(format!(
+                                "unknown 'testRunner' value '{runner}'; \
+                                 the only supported value is 'junit-platform'"
+                            ));
+                        }
+                        task_registrar::register_task(&Task {
+                            name: "generate-test-runner".to_owned(),
+                            inputs: Vec::new(),
+                            outputs: vec![generated_source.clone()],
+                            depends_on: Vec::new(),
+                            action: Action::WriteFile(ulite::ulb::task_registrar::WriteFileArgs {
+                                path: generated_source.clone(),
+                                contents: TEST_RUNNER_SOURCE.to_owned(),
+                            }),
+                        })?;
+                        compile_test_sources.push(generated_source.clone());
+                        compile_tests_depends.push("generate-test-runner".to_owned());
+                    }
+
+                    if !compile_test_sources.is_empty() {
+                        task_registrar::register_task(&Task {
+                            name: "compile-tests".to_owned(),
+                            inputs: compile_test_sources,
+                            outputs: vec![test_classes_dir.clone()],
+                            depends_on: compile_tests_depends,
+                            action: Action::RunTool(RunToolArgs {
+                                tool: AllowlistedTool::Javac,
+                                args: {
+                                    let mut cp = test_compile_classpath.clone();
+                                    cp.push(classes_dir.clone());
+                                    compile_args(&test_classes_dir, &cp, &[])
+                                },
+                                cwd: ".".to_owned(),
+                            }),
+                        })?;
+
+                        let test_args_list =
+                            optional_string_list(jvm, "testArgs").unwrap_or_default();
+
+                        let test_run_invocation = if test_runner.is_some() {
+                            run_test_args(
+                                &{
+                                    let mut tp = test_runtime_classpath;
+                                    tp.push(test_classes_dir.clone());
+                                    tp.push(classes_dir.clone());
+                                    tp
+                                },
+                                "ulite.TestRunner",
+                                std::slice::from_ref(&test_classes_dir),
+                            )
+                        } else {
+                            let tc = test_class.expect("validated above");
+                            run_test_args(
+                                &{
+                                    let mut tp = test_runtime_classpath;
+                                    tp.push(test_classes_dir.clone());
+                                    tp.push(classes_dir.clone());
+                                    tp
+                                },
+                                &tc,
+                                &test_args_list,
+                            )
+                        };
+
+                        task_registrar::register_task(&Task {
+                            name: "test".to_owned(),
+                            inputs: vec![test_classes_dir.clone(), classes_dir.clone()],
+                            outputs: Vec::new(),
+                            depends_on: vec!["compile-tests".to_owned()],
+                            action: Action::RunTool(RunToolArgs {
+                                tool: AllowlistedTool::Java,
+                                args: test_run_invocation,
+                                cwd: ".".to_owned(),
+                            }),
+                        })?;
+                    }
+                }
             }
 
             // ── Android target ─────────────────────────────────────────
@@ -457,11 +586,20 @@ fn reject_unknown_extensions(sources: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn source_set_classpath(config: &serde_json::Value, path: &str) -> Vec<String> {
+    source_set_classpath_bucket(config, path, "compile")
+}
+
+fn source_set_classpath_bucket(
+    config: &serde_json::Value,
+    path: &str,
+    bucket: &str,
+) -> Vec<String> {
     config
         .get("classpathSourceSets")
         .and_then(|sets| sets.get(path))
-        .and_then(|classpath| classpath.get("compile"))
+        .and_then(|classpath| classpath.get(bucket))
         .and_then(serde_json::Value::as_array)
         .map(|jars| {
             jars.iter()
@@ -473,9 +611,17 @@ fn source_set_classpath(config: &serde_json::Value, path: &str) -> Vec<String> {
 }
 
 fn merged_classpath(config: &serde_json::Value, source_sets: &[&str]) -> Vec<String> {
+    merged_classpath_bucket(config, source_sets, "compile")
+}
+
+fn merged_classpath_bucket(
+    config: &serde_json::Value,
+    source_sets: &[&str],
+    bucket: &str,
+) -> Vec<String> {
     let mut merged = Vec::new();
     for name in source_sets {
-        for jar in source_set_classpath(config, &format!("kmp.{name}")) {
+        for jar in source_set_classpath_bucket(config, &format!("kmp.{name}"), bucket) {
             if !merged.contains(&jar) {
                 merged.push(jar);
             }
@@ -517,6 +663,58 @@ fn jar_args(jar_file: &str, classes_dir: &str) -> Vec<String> {
         ".".to_owned(),
     ]
 }
+
+fn run_test_args(classpath: &[String], test_class: &str, extra_args: &[String]) -> Vec<String> {
+    let mut invocation = vec!["-cp".to_owned(), classpath.join(":")];
+    invocation.push(test_class.to_owned());
+    invocation.extend(extra_args.iter().cloned());
+    invocation
+}
+
+const TEST_RUNNER_SOURCE_PATH: &str = "build/generated-test-src/ulite/TestRunner.java";
+
+const TEST_RUNNER_SOURCE: &str = r#"// Generated by the ulite/kmp plugin. Runs the tests compiled into the
+// directory given on the command line through the JUnit Platform Launcher
+// API; the engine(s) on the classpath are discovered automatically. Exits
+// non-zero when any test failed or errored.
+package ulite;
+
+import java.io.File;
+import java.io.PrintWriter;
+import java.util.Collections;
+
+import org.junit.platform.engine.discovery.DiscoverySelectors;
+import org.junit.platform.launcher.Launcher;
+import org.junit.platform.launcher.LauncherDiscoveryRequest;
+import org.junit.platform.launcher.core.LauncherDiscoveryRequestBuilder;
+import org.junit.platform.launcher.core.LauncherFactory;
+import org.junit.platform.launcher.listeners.SummaryGeneratingListener;
+import org.junit.platform.launcher.listeners.TestExecutionSummary;
+
+public final class TestRunner {
+    public static void main(String[] args) {
+        if (args.length != 1) {
+            System.err.println("usage: TestRunner <test-classes-dir>");
+            System.exit(2);
+        }
+        File classesDir = new File(args[0]);
+        LauncherDiscoveryRequest request = LauncherDiscoveryRequestBuilder.request()
+                .selectors(DiscoverySelectors.selectClasspathRoots(
+                        Collections.singleton(classesDir.toPath())))
+                .build();
+        Launcher launcher = LauncherFactory.create();
+        SummaryGeneratingListener listener = new SummaryGeneratingListener();
+        launcher.execute(request, listener);
+        TestExecutionSummary summary = listener.getSummary();
+        PrintWriter out = new PrintWriter(System.out, true);
+        summary.printTo(out);
+        summary.printFailuresTo(out);
+        if (summary.getTotalFailureCount() > 0) {
+            System.exit(1);
+        }
+    }
+}
+"#;
 
 struct Variant {
     name: String,
@@ -982,5 +1180,121 @@ mod tests {
         let pro_release = variants.iter().find(|v| v.name == "ReleasePro").unwrap();
         assert_eq!(free_release.min_sdk, 24);
         assert_eq!(pro_release.min_sdk, 28);
+    }
+
+    #[test]
+    fn source_set_classpath_bucket_reads_any_bucket() {
+        let config = serde_json::json!({
+            "classpathSourceSets": {
+                "kmp.commonMain": {
+                    "compile": ["/repos/compile.jar"],
+                    "testCompile": ["/repos/test-compile.jar"],
+                    "testRuntime": ["/repos/test-runtime.jar"],
+                    "runtime": ["/repos/runtime.jar"]
+                }
+            }
+        });
+        assert_eq!(
+            source_set_classpath_bucket(&config, "kmp.commonMain", "compile"),
+            vec!["/repos/compile.jar".to_owned()]
+        );
+        assert_eq!(
+            source_set_classpath_bucket(&config, "kmp.commonMain", "testCompile"),
+            vec!["/repos/test-compile.jar".to_owned()]
+        );
+        assert_eq!(
+            source_set_classpath_bucket(&config, "kmp.commonMain", "testRuntime"),
+            vec!["/repos/test-runtime.jar".to_owned()]
+        );
+        assert_eq!(
+            source_set_classpath_bucket(&config, "kmp.commonMain", "runtime"),
+            vec!["/repos/runtime.jar".to_owned()]
+        );
+        assert!(source_set_classpath_bucket(&config, "kmp.jvmMain", "compile").is_empty());
+    }
+
+    #[test]
+    fn merged_classpath_bucket_unions_across_source_sets() {
+        let config = serde_json::json!({
+            "classpathSourceSets": {
+                "kmp.commonTest": { "testCompile": ["/repos/shared.jar", "/repos/other.jar"] },
+                "kmp.jvmTest": { "testCompile": ["/repos/jvm-test.jar", "/repos/shared.jar"] }
+            }
+        });
+        assert_eq!(
+            merged_classpath_bucket(&config, &["commonTest", "jvmTest"], "testCompile"),
+            vec![
+                "/repos/shared.jar".to_owned(),
+                "/repos/other.jar".to_owned(),
+                "/repos/jvm-test.jar".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn run_test_args_builds_cp_and_class() {
+        let args = run_test_args(
+            &[
+                "/repos/junit.jar".to_owned(),
+                "/proj/build/test-classes".to_owned(),
+            ],
+            "com.example.AppTest",
+            &[],
+        );
+        assert_eq!(
+            args,
+            vec![
+                "-cp".to_owned(),
+                "/repos/junit.jar:/proj/build/test-classes".to_owned(),
+                "com.example.AppTest".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn run_test_args_appends_extra_args() {
+        let args = run_test_args(
+            &["/repos/junit.jar".to_owned()],
+            "org.junit.runner.JUnitCore",
+            &["com.example.AppTest".to_owned()],
+        );
+        assert_eq!(
+            args,
+            vec![
+                "-cp".to_owned(),
+                "/repos/junit.jar".to_owned(),
+                "org.junit.runner.JUnitCore".to_owned(),
+                "com.example.AppTest".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn run_test_args_for_generated_runner() {
+        let args = run_test_args(
+            &[
+                "/repos/junit.jar".to_owned(),
+                "/proj/build/test-classes".to_owned(),
+                "/proj/build/classes".to_owned(),
+            ],
+            "ulite.TestRunner",
+            &["/proj/build/test-classes".to_owned()],
+        );
+        assert_eq!(
+            args,
+            vec![
+                "-cp".to_owned(),
+                "/repos/junit.jar:/proj/build/test-classes:/proj/build/classes".to_owned(),
+                "ulite.TestRunner".to_owned(),
+                "/proj/build/test-classes".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn generated_runner_source_mentions_launcher_api() {
+        assert!(TEST_RUNNER_SOURCE.contains("LauncherFactory"));
+        assert!(TEST_RUNNER_SOURCE.contains("DiscoverySelectors"));
+        assert!(TEST_RUNNER_SOURCE.contains("SummaryGeneratingListener"));
     }
 }

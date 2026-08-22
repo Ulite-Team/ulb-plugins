@@ -63,6 +63,9 @@ mod bindings {
                     "jar".to_string(),
                     "java".to_string(),
                 ],
+                // The jvm toolchain is self-contained; no other plugin is
+                // required at configure time.
+                dependencies: Vec::new(),
             }
         }
 

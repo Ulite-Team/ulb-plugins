@@ -22,7 +22,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
-          ref: feat/build-variants
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -66,7 +65,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
-          ref: feat/build-variants
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -97,8 +95,8 @@ jobs:
             "plugins": {
               "ulite/hello": {
                 "versions": {
-                  "0.4.0": {
-                    "abi": { "min": "0.4", "max": "0.6" },
+                  "0.5.0": {
+                    "abi": { "min": "0.7", "max": "0.7" },
                     "artifact_url": "hello_plugin.wasm"
                   }
                 }
@@ -107,7 +105,7 @@ jobs:
           }
           JSON
           cp ../ulb-plugins/target/wasm32-wasip2/release/hello_plugin.wasm /tmp/reg/hello_plugin.wasm
-          printf 'plugins {\n  hello = "ulite/hello" @ "0.4.0"\n}\n' > /tmp/reg/libs.ulb
+          printf 'plugins {\n  hello = "ulite/hello" @ "0.5.0"\n}\n' > /tmp/reg/libs.ulb
           cache="$(mktemp -d)"
           resolve() {
             cargo run -q -p uliab -- plugins resolve --project /tmp/reg \
@@ -138,7 +136,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
-          ref: feat/build-variants
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -201,7 +198,7 @@ jobs:
             testClass = "AppTest"
           }
           ULB
-          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.5.0"\n}\n' > /tmp/jvm/libs.ulb
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.6.0"\n}\n' > /tmp/jvm/libs.ulb
           cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/jvm/jvm_plugin.wasm
           cat > /tmp/jvm/index.json <<'JSON'
           {
@@ -209,8 +206,8 @@ jobs:
             "plugins": {
               "ulite/jvm": {
                 "versions": {
-                  "0.5.0": {
-                    "abi": { "min": "0.4", "max": "0.6" },
+                  "0.6.0": {
+                    "abi": { "min": "0.7", "max": "0.7" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
                 }
@@ -260,7 +257,7 @@ jobs:
             jarFile = "build/app.jar"
           }
           ULB
-          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.5.0"\n}\n' > /tmp/jvm-kotlin/libs.ulb
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.6.0"\n}\n' > /tmp/jvm-kotlin/libs.ulb
           cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/jvm-kotlin/jvm_plugin.wasm
           cat > /tmp/jvm-kotlin/index.json <<'JSON'
           {
@@ -268,8 +265,8 @@ jobs:
             "plugins": {
               "ulite/jvm": {
                 "versions": {
-                  "0.5.0": {
-                    "abi": { "min": "0.4", "max": "0.6" },
+                  "0.6.0": {
+                    "abi": { "min": "0.7", "max": "0.7" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
                 }
@@ -299,7 +296,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
-          ref: feat/build-variants
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -360,7 +356,7 @@ jobs:
             testArgs = ["AppTest"]
           }
           ULB
-          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.5.0"\n}\n' > /tmp/jvm-junit/libs.ulb
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.6.0"\n}\n' > /tmp/jvm-junit/libs.ulb
           cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/jvm-junit/jvm_plugin.wasm
           cat > /tmp/jvm-junit/index.json <<'JSON'
           {
@@ -368,8 +364,8 @@ jobs:
             "plugins": {
               "ulite/jvm": {
                 "versions": {
-                  "0.5.0": {
-                    "abi": { "min": "0.4", "max": "0.6" },
+                  "0.6.0": {
+                    "abi": { "min": "0.7", "max": "0.7" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
                 }
@@ -422,7 +418,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
-          ref: feat/build-variants
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -483,7 +478,7 @@ jobs:
             testRunner = "junit-platform"
           }
           ULB
-          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.5.0"\n}\n' > /tmp/jvm-runner/libs.ulb
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.6.0"\n}\n' > /tmp/jvm-runner/libs.ulb
           cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/jvm-runner/jvm_plugin.wasm
           cat > /tmp/jvm-runner/index.json <<'JSON'
           {
@@ -491,8 +486,8 @@ jobs:
             "plugins": {
               "ulite/jvm": {
                 "versions": {
-                  "0.5.0": {
-                    "abi": { "min": "0.4", "max": "0.6" },
+                  "0.6.0": {
+                    "abi": { "min": "0.7", "max": "0.7" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
                 }
@@ -551,7 +546,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
-          ref: feat/build-variants
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -613,7 +607,7 @@ jobs:
             jarFile = "build/app.jar"
           }
           ULB
-          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.5.0"\n}\n' > /tmp/ksp-app/libs.ulb
+          printf 'plugins {\n  jvm = "ulite/jvm" @ "0.6.0"\n}\n' > /tmp/ksp-app/libs.ulb
           cp ../ulb-plugins/target/wasm32-wasip2/release/jvm_plugin.wasm /tmp/ksp-app/jvm_plugin.wasm
           cat > /tmp/ksp-app/index.json <<'JSON'
           {
@@ -621,8 +615,8 @@ jobs:
             "plugins": {
               "ulite/jvm": {
                 "versions": {
-                  "0.5.0": {
-                    "abi": { "min": "0.4", "max": "0.6" },
+                  "0.6.0": {
+                    "abi": { "min": "0.7", "max": "0.7" },
                     "artifact_url": "jvm_plugin.wasm"
                   }
                 }
@@ -737,7 +731,7 @@ jobs:
             }
           }
           ULB
-          printf 'plugins {\n  kmp = "ulite/kmp" @ "0.1.0"\n}\n' > /tmp/kmp/libs.ulb
+          printf 'plugins {\n  kmp = "ulite/kmp" @ "0.2.0"\n}\n' > /tmp/kmp/libs.ulb
           cp ../ulb-plugins/target/wasm32-wasip2/release/kmp_plugin.wasm /tmp/kmp/kmp_plugin.wasm
           cat > /tmp/kmp/index.json <<'JSON'
           {
@@ -745,8 +739,8 @@ jobs:
             "plugins": {
               "ulite/kmp": {
                 "versions": {
-                  "0.1.0": {
-                    "abi": { "min": "0.5", "max": "0.5" },
+                  "0.2.0": {
+                    "abi": { "min": "0.7", "max": "0.7" },
                     "artifact_url": "kmp_plugin.wasm"
                   }
                 }
@@ -830,7 +824,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Ulite-Team/Uliab
-          ref: feat/build-variants
           path: Uliab
           token: ${{ secrets.ULITE_PAT }}
 
@@ -926,7 +919,7 @@ jobs:
             resDir = "res"
           }
           ULB
-          printf 'plugins {\n  android = "ulite/android" @ "0.2.0"\n}\n' > /tmp/android/libs.ulb
+          printf 'plugins {\n  android = "ulite/android" @ "0.3.0"\n}\n' > /tmp/android/libs.ulb
           cp ../ulb-plugins/target/wasm32-wasip2/release/android_plugin.wasm /tmp/android/android_plugin.wasm
           cat > /tmp/android/index.json <<'JSON'
           {
@@ -934,8 +927,8 @@ jobs:
             "plugins": {
               "ulite/android": {
                 "versions": {
-                  "0.2.0": {
-                    "abi": { "min": "0.4", "max": "0.6" },
+                  "0.3.0": {
+                    "abi": { "min": "0.7", "max": "0.7" },
                     "artifact_url": "android_plugin.wasm"
                   }
                 }

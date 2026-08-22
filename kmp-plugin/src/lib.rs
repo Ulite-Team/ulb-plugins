@@ -65,6 +65,11 @@ mod bindings {
                     "kotlinc".to_string(),
                     "jar".to_string(),
                 ],
+                // The jvm-target slice compiles the shared source set with
+                // its own kotlinc invocation; no other plugin is required
+                // yet. Android-target composition will declare
+                // "ulite/android" here.
+                dependencies: Vec::new(),
             }
         }
 

@@ -10,7 +10,9 @@
 //!
 //! **Android target:** compiles `commonMain` + `androidMain` Kotlin, then
 //! per-variant `assembleAndroid<Variant>` tasks merge the kmp dex with the
-//! `ulite/android` plugin's dex and graft the result into the APK.
+//! `ulite/android` plugin's dex and graft the result into the unsigned APK.
+//! If signing is configured, a separate `signKmpAndroid<Variant>` task signs
+//! the APK after the dex graft.
 //!
 //! Consumed keys are documented in `docs/kmp-plugin.md`
 //! (Uliab/docs/architecture.md §5.3).
@@ -50,6 +52,7 @@ mod bindings {
                     "kotlinc".to_string(),
                     "jar".to_string(),
                     "java".to_string(),
+                    "apksigner".to_string(),
                 ],
                 dependencies: vec!["ulite/android".to_string()],
             }
@@ -217,7 +220,13 @@ mod bindings {
                 }
                 let sources = resolve_paths(project_dir, &sources);
                 reject_unknown_extensions(&sources)?;
-                let (_, kotlin_sources) = partition_sources(&sources);
+                let (java_sources, kotlin_sources) = partition_sources(&sources);
+                if !java_sources.is_empty() {
+                    return Err("the Android target only compiles Kotlin (.kt) sources; \
+                         move .java files to the JVM target or remove them from the \
+                         Android source sets"
+                        .to_owned());
+                }
 
                 let compile_classpath = merged_classpath(&config, ANDROID_SOURCE_SETS);
 
@@ -254,6 +263,35 @@ mod bindings {
                 })?;
 
                 let variants = compute_variants(&config)?;
+                let has_signing = config.get("signing").is_some();
+                let build_tools_dir = sdk_root
+                    .join("build-tools")
+                    .join(crate::find_build_tools_version(&sdk_root)?);
+                let signing_config = if has_signing {
+                    let signing = config.get("signing").unwrap();
+                    let keystore = resolve_path(
+                        project_dir,
+                        signing
+                            .get("storeFile")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| {
+                                "the 'signing' block is missing 'storeFile'".to_owned()
+                            })?,
+                    );
+                    let key_alias = signing
+                        .get("keyAlias")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| "the 'signing' block is missing 'keyAlias'".to_owned())?
+                        .to_owned();
+                    let ks_password_file =
+                        std::path::Path::new(project_dir).join("build/android/ks-password.txt");
+                    let key_password_file =
+                        std::path::Path::new(project_dir).join("build/android/key-password.txt");
+                    Some((keystore, key_alias, ks_password_file, key_password_file))
+                } else {
+                    None
+                };
+
                 for variant in &variants {
                     let variant_build = std::path::Path::new(project_dir)
                         .join("build/android")
@@ -264,12 +302,7 @@ mod bindings {
                         android_build_dir.join(format!("dex-{}", variant.variant_dir));
                     let merged_dex = merged_dex_dir.join("classes.dex");
 
-                    let has_signing = config.get("signing").is_some();
-                    let terminal_task = if has_signing {
-                        format!("ulite/android:signApk{}", variant.name)
-                    } else {
-                        format!("ulite/android:packageApk{}", variant.name)
-                    };
+                    let package_task = format!("ulite/android:packageApk{}", variant.name);
 
                     task_registrar::register_task(&Task {
                         name: format!("mergeDex{}", variant.name),
@@ -293,7 +326,7 @@ mod bindings {
                                 &merged_dex_dir.to_string_lossy(),
                                 variant.min_sdk,
                                 &platform_jar.to_string_lossy(),
-                            ),
+                            )?,
                             cwd: ".".to_owned(),
                         }),
                     })?;
@@ -305,7 +338,7 @@ mod bindings {
                             variant_apk.to_string_lossy().into_owned(),
                         ],
                         outputs: vec![variant_apk.to_string_lossy().into_owned()],
-                        depends_on: vec![format!("mergeDex{}", variant.name), terminal_task],
+                        depends_on: vec![format!("mergeDex{}", variant.name), package_task],
                         action: Action::RunTool(RunToolArgs {
                             tool: AllowlistedTool::Jar,
                             args: vec![
@@ -318,6 +351,43 @@ mod bindings {
                             cwd: ".".to_owned(),
                         }),
                     })?;
+
+                    if let Some((ref keystore, ref key_alias, ref ks_pw, ref key_pw)) =
+                        signing_config
+                    {
+                        task_registrar::register_task(&Task {
+                            name: format!("signKmpAndroid{}", variant.name),
+                            inputs: vec![
+                                variant_apk.to_string_lossy().into_owned(),
+                                keystore.clone(),
+                                ks_pw.to_string_lossy().into_owned(),
+                                key_pw.to_string_lossy().into_owned(),
+                            ],
+                            outputs: vec![variant_apk.to_string_lossy().into_owned()],
+                            depends_on: vec![
+                                format!("assembleAndroid{}", variant.name),
+                                "ulite/android:writeSigningPasswords".to_owned(),
+                                "ulite/android:writeSigningKeyPassword".to_owned(),
+                            ],
+                            action: Action::RunTool(RunToolArgs {
+                                tool: AllowlistedTool::Apksigner,
+                                args: vec![
+                                    build_tools_dir.to_string_lossy().into_owned(),
+                                    "sign".to_owned(),
+                                    "--ks".to_owned(),
+                                    keystore.clone(),
+                                    "--ks-key-alias".to_owned(),
+                                    key_alias.clone(),
+                                    "--ks-pass".to_owned(),
+                                    format!("file:{}", ks_pw.to_string_lossy()),
+                                    "--key-pass".to_owned(),
+                                    format!("file:{}", key_pw.to_string_lossy()),
+                                    variant_apk.to_string_lossy().into_owned(),
+                                ],
+                                cwd: ".".to_owned(),
+                            }),
+                        })?;
+                    }
                 }
             }
 
@@ -508,15 +578,34 @@ fn compute_variants(config: &serde_json::Value) -> Result<Vec<Variant>, String> 
 
     let mut variants = Vec::new();
 
+    let bt_min_sdk = |bt_name: &str| -> Option<i64> {
+        config
+            .get("buildTypes")
+            .and_then(|bt| bt.get(bt_name))
+            .and_then(|v| v.as_object())
+            .and_then(|b| b.get("minSdk"))
+            .and_then(serde_json::Value::as_i64)
+    };
+
+    let flavor_min_sdk = |flavor_name: &str| -> Option<i64> {
+        config
+            .get("productFlavors")
+            .and_then(|pf| pf.get(flavor_name))
+            .and_then(|v| v.as_object())
+            .and_then(|b| b.get("minSdk"))
+            .and_then(serde_json::Value::as_i64)
+    };
+
     if flavors.is_empty() {
         for bt in &build_type_names {
             let name = to_pascal_case(bt);
             let variant_dir = to_pascal_case(bt).to_lowercase();
             let apk_filename = format!("app-{variant_dir}.apk");
+            let effective_min_sdk = bt_min_sdk(bt).unwrap_or(base_min_sdk);
             variants.push(Variant {
                 name,
                 variant_dir,
-                min_sdk: base_min_sdk,
+                min_sdk: effective_min_sdk,
                 apk_filename,
             });
         }
@@ -530,10 +619,13 @@ fn compute_variants(config: &serde_json::Value) -> Result<Vec<Variant>, String> 
                     to_pascal_case(flavor_name)
                 );
                 let apk_filename = format!("app-{}.apk", variant_dir);
+                let effective_min_sdk = flavor_min_sdk(flavor_name)
+                    .or_else(|| bt_min_sdk(bt))
+                    .unwrap_or(base_min_sdk);
                 variants.push(Variant {
                     name: variant_name,
                     variant_dir,
-                    min_sdk: base_min_sdk,
+                    min_sdk: effective_min_sdk,
                     apk_filename,
                 });
             }
@@ -601,10 +693,11 @@ fn d8_merge_args(
     output_dir: &str,
     min_sdk: i64,
     platform_jar: &str,
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
+    let version = find_build_tools_version(sdk_root)?;
     let d8_jar = sdk_root
         .join("build-tools")
-        .join(find_build_tools_version(sdk_root))
+        .join(version)
         .join("lib")
         .join("d8.jar");
 
@@ -620,26 +713,33 @@ fn d8_merge_args(
     for jar in input_jars {
         args.push(jar.to_string());
     }
-    args
+    Ok(args)
 }
 
-fn find_build_tools_version(sdk_root: &std::path::Path) -> String {
+fn find_build_tools_version(sdk_root: &std::path::Path) -> Result<String, String> {
     let build_tools = sdk_root.join("build-tools");
     let mut candidates: Vec<(Vec<u64>, String)> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&build_tools) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let rank: Vec<u64> = name.split('.').filter_map(|p| p.parse().ok()).collect();
-            if rank.len() == 3 {
-                candidates.push((rank, name));
-            }
+    let entries = std::fs::read_dir(&build_tools)
+        .map_err(|error| format!("cannot list '{}': {error}", build_tools.display()))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("cannot read '{}': {error}", build_tools.display()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let rank: Vec<u64> = name.split('.').filter_map(|p| p.parse().ok()).collect();
+        if rank.len() == 3 {
+            candidates.push((rank, name));
         }
     }
     candidates
         .into_iter()
         .max_by_key(|(rank, _)| rank.clone())
         .map(|(_, name)| name)
-        .unwrap_or_else(|| "36.0.0".to_owned())
+        .ok_or_else(|| {
+            format!(
+                "no build-tools version found under '{}'; install the Android SDK build-tools",
+                build_tools.display()
+            )
+        })
 }
 
 #[cfg(test)]
@@ -820,5 +920,67 @@ mod tests {
         assert_eq!(to_pascal_case("debug"), "Debug");
         assert_eq!(to_pascal_case("release"), "Release");
         assert_eq!(to_pascal_case("free"), "Free");
+    }
+
+    #[test]
+    fn find_build_tools_version_errs_when_sdk_has_no_build_tools() {
+        let dir = std::env::temp_dir().join("ulb-test-no-buildtools");
+        let bt = dir.join("build-tools");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&bt).unwrap();
+        let err = find_build_tools_version(&dir).unwrap_err();
+        assert!(
+            err.contains("no build-tools version found"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_build_tools_version_picks_highest_version() {
+        let dir = std::env::temp_dir().join("ulb-test-buildtools");
+        let bt = dir.join("build-tools");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(bt.join("35.0.0")).unwrap();
+        std::fs::create_dir_all(bt.join("36.0.1")).unwrap();
+        std::fs::create_dir_all(bt.join("36.0.0")).unwrap();
+        assert_eq!(find_build_tools_version(&dir).unwrap(), "36.0.1".to_owned());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compute_variants_respects_build_type_min_sdk_override() {
+        let config = serde_json::json!({
+            "android": { "compileSdk": 34, "minSdk": 21 },
+            "buildTypes": {
+                "debug": {},
+                "release": { "minSdk": 24 }
+            }
+        });
+        let variants = compute_variants(&config).unwrap();
+        let debug = variants.iter().find(|v| v.name == "Debug").unwrap();
+        let release = variants.iter().find(|v| v.name == "Release").unwrap();
+        assert_eq!(debug.min_sdk, 21);
+        assert_eq!(release.min_sdk, 24);
+    }
+
+    #[test]
+    fn compute_variants_flavor_min_sdk_takes_precedence() {
+        let config = serde_json::json!({
+            "android": { "compileSdk": 34, "minSdk": 21 },
+            "buildTypes": {
+                "release": { "minSdk": 24 }
+            },
+            "productFlavors": {
+                "dimension": "tier",
+                "free": { "dimension": "tier" },
+                "pro": { "dimension": "tier", "minSdk": 28 }
+            }
+        });
+        let variants = compute_variants(&config).unwrap();
+        let free_release = variants.iter().find(|v| v.name == "ReleaseFree").unwrap();
+        let pro_release = variants.iter().find(|v| v.name == "ReleasePro").unwrap();
+        assert_eq!(free_release.min_sdk, 24);
+        assert_eq!(pro_release.min_sdk, 28);
     }
 }

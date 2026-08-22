@@ -10,7 +10,7 @@ instantiation path with no toolchain involved.
 - Exports the `ulb-plugin` world: `manifest`, `configure`, and the legacy
   `run` entry point (kept so `uliab run <wasm> <input>` works against it).
 - `manifest` reports `name: "ulite/hello"`, version from
-  `CARGO_PKG_VERSION` (0.4.0), and `abi_version` taken verbatim from
+  `CARGO_PKG_VERSION` (0.5.0), and `abi_version` taken verbatim from
   `ulb_plugin_sdk::ABI_VERSION` — never a hand-typed literal, so the
   host's ABI check cannot be tricked by drift in this crate.
 - Declares **no tools** (it registers no tasks).

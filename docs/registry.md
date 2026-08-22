@@ -14,9 +14,9 @@ the index and the release assets it points at.
   "plugins": {
     "ulite/hello": {
       "versions": {
-        "0.4.0": {
-          "abi": { "min": "0.4", "max": "0.4" },
-          "artifact_url": "https://github.com/Ulite-Team/ulb-plugins/releases/download/hello-plugin-v0.4.0/hello_plugin.wasm"
+        "0.5.0": {
+          "abi": { "min": "0.7", "max": "0.7" },
+          "artifact_url": "https://github.com/Ulite-Team/ulb-plugins/releases/download/hello-plugin-v0.5.0/hello_plugin.wasm"
         }
       }
     }
@@ -35,10 +35,14 @@ the index and the release assets it points at.
 
 ## The committed index today
 
-`ulite/hello@0.4.0` and `ulite/jvm@0.5.0` are the published rows. Their
+The newest published rows are `ulite/hello@0.5.0`, `ulite/jvm@0.6.0`,
+`ulite/android@0.3.0`, and `ulite/kmp@0.2.0`, all declaring ABI range
+`{min: 0.7, max: 0.7}`. Older rows (e.g. `ulite/hello@0.4.0`) remain in
+the index for hosts still resolving older ABI targets; their
 `artifact_url` rows point at release assets
-(`hello-plugin-v0.4.0/hello_plugin.wasm`, `jvm-plugin-v0.5.0/jvm_plugin.wasm`)
-published by the `release` workflow. The registry jobs in CI additionally
+(`hello-plugin-v0.4.0/hello_plugin.wasm`,
+`jvm-plugin-v0.5.0/jvm_plugin.wasm`) published by the `release`
+workflow. The registry jobs in CI additionally
 seed a *local* index from the checkout's build output so the resolve path
 is exercised without network ([ci.md](ci.md)).
 

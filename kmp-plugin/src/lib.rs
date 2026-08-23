@@ -29,9 +29,10 @@ mod bindings {
     });
 
     use crate::{
-        TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args, compute_variants, jar_args,
-        kotlinc_android_args, merged_classpath, merged_classpath_bucket, optional_string_list,
-        partition_sources, reject_unknown_extensions, resolve_path, resolve_paths, run_test_args,
+        TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args, compute_variants,
+        find_compose_compiler_jar, jar_args, kotlinc_android_args, merged_classpath,
+        merged_classpath_bucket, optional_string_list, partition_sources,
+        reject_unknown_extensions, resolve_path, resolve_paths, run_test_args,
     };
     use exports::ulite::ulb::ulb_plugin::{Guest, PluginManifest};
     use serde_json::Value;
@@ -359,6 +360,22 @@ mod bindings {
 
                 let compile_classpath = merged_classpath(&config, ANDROID_SOURCE_SETS);
 
+                let compose = config
+                    .get("android")
+                    .and_then(|a| a.get("compose"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let compose_compiler_jar = if compose {
+                    Some(find_compose_compiler_jar(&compile_classpath).ok_or_else(|| {
+                        "compose = true but the compose compiler plugin JAR was not found on the \
+                         compile classpath; add a dependency such as \
+                         \"org.jetbrains.kotlin:compose-compiler-plugin:<kotlin-version>\""
+                            .to_owned()
+                    })?)
+                } else {
+                    None
+                };
+
                 task_registrar::register_task(&Task {
                     name: "compileAndroid".to_owned(),
                     inputs: kotlin_sources.clone(),
@@ -371,7 +388,7 @@ mod bindings {
                             &platform_jar.to_string_lossy(),
                             &compile_classpath,
                             &kotlin_sources,
-                            false,
+                            compose_compiler_jar.as_deref(),
                         ),
                         cwd: ".".to_owned(),
                     }),
@@ -444,10 +461,14 @@ mod bindings {
 
                     task_registrar::register_task(&Task {
                         name: format!("mergeDex{}", variant.name),
-                        inputs: vec![
-                            variant_classes_jar.to_string_lossy().into_owned(),
-                            kmp_jar.to_string_lossy().into_owned(),
-                        ],
+                        inputs: {
+                            let mut inp = vec![
+                                variant_classes_jar.to_string_lossy().into_owned(),
+                                kmp_jar.to_string_lossy().into_owned(),
+                            ];
+                            inp.extend(d8_extra_jars.iter().cloned());
+                            inp
+                        },
                         outputs: vec![merged_dex.to_string_lossy().into_owned()],
                         depends_on: vec![
                             "jarKmpAndroid".to_owned(),
@@ -649,20 +670,27 @@ fn compile_args(classes_dir: &str, classpath: &[String], sources: &[String]) -> 
     args
 }
 
+fn find_compose_compiler_jar(classpath: &[String]) -> Option<String> {
+    classpath
+        .iter()
+        .find(|p| p.contains("compose-compiler-plugin") && p.ends_with(".jar"))
+        .cloned()
+}
+
 fn kotlinc_android_args(
     classes_dir: &str,
     platform_jar: &str,
     classpath: &[String],
     sources: &[String],
-    compose: bool,
+    compose_compiler_jar: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec!["-d".to_owned(), classes_dir.to_owned()];
     let mut cp = vec![platform_jar.to_owned()];
     cp.extend(classpath.iter().cloned());
     args.extend(["-cp".to_owned(), cp.join(":")]);
     args.extend(["-jvm-target".to_owned(), "17".to_owned()]);
-    if compose {
-        args.push("-plugin:androidx.compose.compiler.plugins.kotlin".to_owned());
+    if let Some(jar) = compose_compiler_jar {
+        args.push(format!("-Xplugin={jar}"));
     }
     args.extend(sources.iter().cloned());
     args
@@ -1122,7 +1150,7 @@ mod tests {
             "/sdk/platforms/android-34/android.jar",
             &["/repos/lib.jar".to_owned()],
             &["/proj/src/Foo.kt".to_owned()],
-            false,
+            None,
         );
         assert!(args.contains(&"-d".to_owned()));
         assert!(args.contains(&"/proj/build/classes".to_owned()));
@@ -1130,7 +1158,34 @@ mod tests {
         assert!(args.contains(&"-jvm-target".to_owned()));
         assert!(args.contains(&"17".to_owned()));
         assert!(args.contains(&"/proj/src/Foo.kt".to_owned()));
-        assert!(!args.contains(&"-plugin:androidx.compose.compiler.plugins.kotlin".to_owned()));
+        assert!(!args.iter().any(|a| a.starts_with("-Xplugin=")));
+    }
+
+    #[test]
+    fn kotlinc_android_loads_compose_plugin_via_xplugin() {
+        let args = kotlinc_android_args(
+            "/proj/build/classes",
+            "/sdk/platforms/android-34/android.jar",
+            &[],
+            &["/proj/src/Foo.kt".to_owned()],
+            Some("/maven/compose-compiler-plugin-2.0.jar"),
+        );
+        assert!(
+            args.contains(&"-Xplugin=/maven/compose-compiler-plugin-2.0.jar".to_owned()),
+            "compose JAR must be loaded via -Xplugin=<path>, got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn find_compose_compiler_jar_matches_jar_filename() {
+        let cp = vec![
+            "/maven/appcompat-1.7.0.jar".to_owned(),
+            "/maven/compose-compiler-plugin-2.0.0.jar".to_owned(),
+        ];
+        assert_eq!(
+            find_compose_compiler_jar(&cp),
+            Some("/maven/compose-compiler-plugin-2.0.0.jar".to_owned())
+        );
     }
 
     #[test]

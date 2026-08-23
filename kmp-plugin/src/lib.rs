@@ -394,6 +394,14 @@ mod bindings {
 
                 let variants = compute_variants(&config)?;
                 let has_signing = config.get("signing").is_some();
+
+                let mut d8_extra_jars: Vec<String> = Vec::new();
+                for jar in &compile_classpath {
+                    if jar.contains("kotlin-stdlib") {
+                        d8_extra_jars.push(jar.clone());
+                    }
+                }
+
                 let build_tools_dir = sdk_root
                     .join("build-tools")
                     .join(crate::find_build_tools_version(&sdk_root)?);
@@ -456,6 +464,7 @@ mod bindings {
                                 &merged_dex_dir.to_string_lossy(),
                                 variant.min_sdk,
                                 &platform_jar.to_string_lossy(),
+                                &d8_extra_jars,
                             )?,
                             cwd: ".".to_owned(),
                         }),
@@ -896,6 +905,7 @@ fn d8_merge_args(
     output_dir: &str,
     min_sdk: i64,
     platform_jar: &str,
+    extra_jars: &[String],
 ) -> Result<Vec<String>, String> {
     let version = find_build_tools_version(sdk_root)?;
     let d8_jar = sdk_root
@@ -915,6 +925,9 @@ fn d8_merge_args(
     ];
     for jar in input_jars {
         args.push(jar.to_string());
+    }
+    for jar in extra_jars {
+        args.push(jar.clone());
     }
     Ok(args)
 }

@@ -9,18 +9,24 @@ Java, Kotlin, and Android knowledge lives here.
 
 ## Plugins
 
-| Plugin | Version | What it does |
-|---|---|---|
-| `ulite/hello` | 0.5.0 | The minimal plugin: establishes the build/test path, echoes its input under the host |
-| `ulite/jvm` | 0.6.0 | Compiles a module's Java/Kotlin sources, packages a jar, compiles and runs tests (JUnit 4/5), and runs the KSP2 tool over Kotlin sources |
-| `ulite/android` | 0.3.0 | Discovers the Android SDK and compiles a module's Java sources and resources into per-variant APKs |
-| `ulite/kmp` | 0.2.0 | Compiles a Kotlin multiplatform module's shared and jvm source sets into a jar |
+| Plugin | Version | ABI | What it does |
+|---|---|---|---|
+| `ulite/hello` | 0.5.0 | 0.7 | The minimal plugin: establishes the build/test path, echoes its input under the host |
+| `ulite/jvm` | 0.6.0 | 0.7 | Compiles a module's Java/Kotlin sources, packages a jar, compiles and runs tests (JUnit 4 via a runner class, JUnit 5 via a generated platform launcher runner), and runs the KSP2 tool over Kotlin sources |
+| `ulite/android` | 0.3.0 | 0.7 | Discovers the Android SDK, compiles Java and Kotlin sources, merges resources with `aapt2`, dexes with `d8`, packages per-variant APKs (`buildTypes {}` × `productFlavors {}`), signs them with `apksigner`, and wires the Compose compiler plugin |
+| `ulite/kmp` | 0.3.0 | 0.7 | Compiles a multiplatform module's shared and jvm source sets into a jar with per-target JVM tests, and builds an Android target (APKs) by composing with `ulite/android` across the plugin ABI |
+
+All four are published as GitHub release assets at ABI 0.7 and indexed in
+[`registry/index.json`](registry/index.json), so the core tool resolves
+them from its default registry URL with no configuration.
 
 ## Repository layout
 
 ```
 hello-plugin/       ulite/hello — minimal world implementation
 jvm-plugin/         ulite/jvm — the reference plugin
+android-plugin/     ulite/android — compile/package/sign chain, variants
+kmp-plugin/         ulite/kmp — shared/jvm source sets + Android target
 registry/index.json The plugin registry index
 fixtures/ksp-hello/ A real KSP processor fixture for the ksp task
 .github/workflows/  plugin-build: system tests against real components
@@ -64,7 +70,9 @@ runs under the real host (`uliab run`).
 Everything lives in [`docs/`](docs/index.md):
 [architecture](docs/architecture.md), the
 [`ulite/jvm` reference](docs/jvm-plugin.md), [`ulite/hello`](docs/hello-plugin.md),
-the [registry index](docs/registry.md), the [CI workflow](docs/ci.md),
+the [`ulite/android` reference](docs/android-plugin.md), the
+[`ulite/kmp` reference](docs/kmp-plugin.md), the
+[registry index](docs/registry.md), the [CI workflow](docs/ci.md),
 and the [KSP fixture](docs/ksp-fixture.md).
 
 ## License

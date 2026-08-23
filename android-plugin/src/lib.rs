@@ -79,10 +79,10 @@ mod bindings {
     });
 
     use crate::{
-        android_jar, classpath_bucket, compile_args, compute_variants, d8_args,
-        highest_build_tools, int_value, kotlinc_android_args, package_args, partition_sources,
-        reject_unknown_extensions, resolve_path, resolve_sdk_root, rgen_java_path, string_list,
-        string_value,
+        android_jar, bool_value, classpath_bucket, compile_args, compute_variants, d8_args,
+        find_compose_compiler_jar, highest_build_tools, int_value, kotlinc_android_args,
+        package_args, partition_sources, reject_unknown_extensions, resolve_path, resolve_sdk_root,
+        rgen_java_path, string_list, string_value,
     };
     use exports::ulite::ulb::ulb_plugin::{Guest, PluginManifest};
     use serde_json::Value;
@@ -127,6 +127,7 @@ mod bindings {
 
             let compile_sdk = int_value(android, "compileSdk")?;
             let namespace = string_value(android, "namespace")?;
+            let compose = bool_value(android, "compose")?;
             let all_sources = resolve_paths(project_dir, &string_list(android, "sources")?);
             if all_sources.is_empty() {
                 return Err("the 'android' block declares no sources".to_owned());
@@ -384,6 +385,16 @@ mod bindings {
 
                 // Kotlin compilation: kotlinc sees the classes dir so it
                 // resolves the module's own Java classes and R.java.
+                let compose_compiler_jar = if compose {
+                    Some(find_compose_compiler_jar(&classpath).ok_or_else(|| {
+                        "compose = true but the compose compiler plugin JAR was not found on the \
+                         compile classpath; add a dependency such as \
+                         \"org.jetbrains.kotlin:compose-compiler-plugin:<kotlin-version>\""
+                            .to_owned()
+                    })?)
+                } else {
+                    None
+                };
                 let mut compile_tasks = vec![format!("compileJava{}", variant.name)];
                 if !kotlin_sources.is_empty() {
                     run_tool_task(
@@ -397,6 +408,7 @@ mod bindings {
                             &platform_jar.to_string_lossy(),
                             &classpath,
                             &kotlin_sources,
+                            compose_compiler_jar.as_deref(),
                         ),
                     )?;
                     compile_tasks.push(format!("compileKotlin{}", variant.name));
@@ -757,6 +769,19 @@ fn int_value(android: &serde_json::Value, key: &str) -> Result<i64, String> {
         .ok_or_else(|| format!("the 'android' block is missing a numeric '{key}'"))
 }
 
+/// Reads an optional boolean key, returning `false` when absent.  The host
+/// serializes `compose = true` as a JSON `true` and `compose = false` as
+/// `false`; a non-boolean value is a configure error.
+fn bool_value(android: &serde_json::Value, key: &str) -> Result<bool, String> {
+    match android.get(key) {
+        Some(serde_json::Value::Bool(b)) => Ok(*b),
+        Some(other) => Err(format!(
+            "the 'android' block key '{key}' must be true or false, got {other}"
+        )),
+        None => Ok(false),
+    }
+}
+
 /// The SDK root the build uses: the module block's `sdkDir` when set
 /// (resolved against the project directory like every other block path),
 /// otherwise the root the host injected as `androidSdkDir` (its own
@@ -932,16 +957,29 @@ fn compile_args(
     args
 }
 
+/// The compose compiler plugin JAR is a Maven artifact whose filename
+/// contains `compose-compiler-plugin`.  Scanning the compile classpath
+/// avoids hard-coding an artifact coordinate or path convention.
+fn find_compose_compiler_jar(classpath: &[String]) -> Option<String> {
+    classpath
+        .iter()
+        .find(|p| p.contains("compose-compiler-plugin") && p.ends_with(".jar"))
+        .cloned()
+}
+
 /// The kotlinc invocation for the Kotlin compile task: emit classes to `-d`,
 /// feed the classpath (the platform jar + dependency jars + the classes dir
 /// so kotlinc resolves the module's own Java classes and R.java) to `-cp`,
 /// pin the JVM target to 17 to match javac's `--release 17`, then the
-/// source files.
+/// source files.  When a Compose compiler plugin JAR is provided, it is
+/// loaded via `-Xplugin=<path>` — the standard Kotlin CLI contract for
+/// compiler plugins.
 fn kotlinc_android_args(
     classes_dir: &str,
     platform_jar: &str,
     classpath: &[String],
     sources: &[String],
+    compose_compiler_jar: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec!["-d".to_owned(), classes_dir.to_owned()];
     let mut cp = vec![platform_jar.to_owned()];
@@ -949,6 +987,9 @@ fn kotlinc_android_args(
     cp.push(classes_dir.to_owned());
     args.extend(["-cp".to_owned(), cp.join(":")]);
     args.extend(["-jvm-target".to_owned(), "17".to_owned()]);
+    if let Some(jar) = compose_compiler_jar {
+        args.push(format!("-Xplugin={jar}"));
+    }
     args.extend(sources.iter().cloned());
     args
 }
@@ -1019,10 +1060,10 @@ fn package_args(apk: &std::path::Path, dex_dir: &std::path::Path) -> Vec<String>
 #[cfg(test)]
 mod tests {
     use super::{
-        android_jar, classpath_bucket, compile_args, compute_variants, d8_args,
-        highest_build_tools, int_value, kotlinc_android_args, optional_int, package_args,
-        partition_sources, reject_unknown_extensions, resolve_path, resolve_sdk_root,
-        rgen_java_path, string_list, string_value, to_pascal_case, version_rank,
+        android_jar, bool_value, classpath_bucket, compile_args, compute_variants, d8_args,
+        find_compose_compiler_jar, highest_build_tools, int_value, kotlinc_android_args,
+        optional_int, package_args, partition_sources, reject_unknown_extensions, resolve_path,
+        resolve_sdk_root, rgen_java_path, string_list, string_value, to_pascal_case, version_rank,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -1466,6 +1507,7 @@ mod tests {
             "/sdk/platforms/android-36/android.jar",
             &["/repos/one.jar".to_owned()],
             &["/proj/src/Main.kt".to_owned()],
+            None,
         );
         assert_eq!(
             args,
@@ -1489,6 +1531,7 @@ mod tests {
             "/sdk/platforms/android-36/android.jar",
             &[],
             &["/proj/src/Main.kt".to_owned()],
+            None,
         );
         assert_eq!(
             args,
@@ -1502,5 +1545,78 @@ mod tests {
                 "/proj/src/Main.kt".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn kotlinc_android_invocation_loads_compose_plugin_via_xplugin() {
+        let args = kotlinc_android_args(
+            "/proj/build/classes",
+            "/sdk/platforms/android-36/android.jar",
+            &[],
+            &["/proj/src/Main.kt".to_owned()],
+            Some("/maven/compose-compiler-plugin-2.0.jar"),
+        );
+        assert!(
+            args.contains(&"-Xplugin=/maven/compose-compiler-plugin-2.0.jar".to_owned()),
+            "compose JAR must be loaded via -Xplugin=<path>, got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn kotlinc_android_invocation_omits_compose_plugin_when_absent() {
+        let args = kotlinc_android_args(
+            "/proj/build/classes",
+            "/sdk/platforms/android-36/android.jar",
+            &[],
+            &["/proj/src/Main.kt".to_owned()],
+            None,
+        );
+        assert!(
+            !args.iter().any(|a| a.starts_with("-Xplugin=")),
+            "None must not add a -Xplugin arg"
+        );
+    }
+
+    #[test]
+    fn find_compose_compiler_jar_matches_jar_filename() {
+        let cp = vec![
+            "/maven/appcompat-1.7.0.jar".to_owned(),
+            "/maven/compose-compiler-plugin-2.0.0.jar".to_owned(),
+        ];
+        assert_eq!(
+            find_compose_compiler_jar(&cp),
+            Some("/maven/compose-compiler-plugin-2.0.0.jar".to_owned())
+        );
+    }
+
+    #[test]
+    fn find_compose_compiler_jar_returns_none_when_absent() {
+        let cp = vec!["/maven/appcompat-1.7.0.jar".to_owned()];
+        assert_eq!(find_compose_compiler_jar(&cp), None);
+    }
+
+    #[test]
+    fn bool_value_parses_true() {
+        let v = serde_json::json!({ "compose": true });
+        assert!(bool_value(&v, "compose").unwrap());
+    }
+
+    #[test]
+    fn bool_value_parses_false() {
+        let v = serde_json::json!({ "compose": false });
+        assert!(!bool_value(&v, "compose").unwrap());
+    }
+
+    #[test]
+    fn bool_value_defaults_to_false_when_absent() {
+        let v = serde_json::json!({});
+        assert!(!bool_value(&v, "compose").unwrap());
+    }
+
+    #[test]
+    fn bool_value_rejects_non_boolean() {
+        let v = serde_json::json!({ "compose": "yes" });
+        let err = bool_value(&v, "compose").unwrap_err();
+        assert!(err.contains("true or false"), "{err}");
     }
 }

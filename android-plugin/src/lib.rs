@@ -79,7 +79,7 @@ mod bindings {
     });
 
     use crate::{
-        android_jar, classpath_bucket, compile_args, compute_variants, d8_args,
+        android_jar, bool_value, classpath_bucket, compile_args, compute_variants, d8_args,
         highest_build_tools, int_value, kotlinc_android_args, package_args, partition_sources,
         reject_unknown_extensions, resolve_path, resolve_sdk_root, rgen_java_path, string_list,
         string_value,
@@ -127,6 +127,7 @@ mod bindings {
 
             let compile_sdk = int_value(android, "compileSdk")?;
             let namespace = string_value(android, "namespace")?;
+            let compose = bool_value(android, "compose")?;
             let all_sources = resolve_paths(project_dir, &string_list(android, "sources")?);
             if all_sources.is_empty() {
                 return Err("the 'android' block declares no sources".to_owned());
@@ -397,6 +398,7 @@ mod bindings {
                             &platform_jar.to_string_lossy(),
                             &classpath,
                             &kotlin_sources,
+                            compose,
                         ),
                     )?;
                     compile_tasks.push(format!("compileKotlin{}", variant.name));
@@ -757,6 +759,19 @@ fn int_value(android: &serde_json::Value, key: &str) -> Result<i64, String> {
         .ok_or_else(|| format!("the 'android' block is missing a numeric '{key}'"))
 }
 
+/// Reads an optional boolean key, returning `false` when absent.  The host
+/// serializes `compose = true` as a JSON `true` and `compose = false` as
+/// `false`; a non-boolean value is a configure error.
+fn bool_value(android: &serde_json::Value, key: &str) -> Result<bool, String> {
+    match android.get(key) {
+        Some(serde_json::Value::Bool(b)) => Ok(*b),
+        Some(other) => Err(format!(
+            "the 'android' block key '{key}' must be true or false, got {other}"
+        )),
+        None => Ok(false),
+    }
+}
+
 /// The SDK root the build uses: the module block's `sdkDir` when set
 /// (resolved against the project directory like every other block path),
 /// otherwise the root the host injected as `androidSdkDir` (its own
@@ -936,12 +951,14 @@ fn compile_args(
 /// feed the classpath (the platform jar + dependency jars + the classes dir
 /// so kotlinc resolves the module's own Java classes and R.java) to `-cp`,
 /// pin the JVM target to 17 to match javac's `--release 17`, then the
-/// source files.
+/// source files.  When `compose` is true the Compose compiler plugin is
+/// enabled — bundled with Kotlin 2.0+, no separate artifact download needed.
 fn kotlinc_android_args(
     classes_dir: &str,
     platform_jar: &str,
     classpath: &[String],
     sources: &[String],
+    compose: bool,
 ) -> Vec<String> {
     let mut args = vec!["-d".to_owned(), classes_dir.to_owned()];
     let mut cp = vec![platform_jar.to_owned()];
@@ -949,6 +966,9 @@ fn kotlinc_android_args(
     cp.push(classes_dir.to_owned());
     args.extend(["-cp".to_owned(), cp.join(":")]);
     args.extend(["-jvm-target".to_owned(), "17".to_owned()]);
+    if compose {
+        args.push("-plugin:androidx.compose.compiler.plugins.kotlin".to_owned());
+    }
     args.extend(sources.iter().cloned());
     args
 }
@@ -1019,7 +1039,7 @@ fn package_args(apk: &std::path::Path, dex_dir: &std::path::Path) -> Vec<String>
 #[cfg(test)]
 mod tests {
     use super::{
-        android_jar, classpath_bucket, compile_args, compute_variants, d8_args,
+        android_jar, bool_value, classpath_bucket, compile_args, compute_variants, d8_args,
         highest_build_tools, int_value, kotlinc_android_args, optional_int, package_args,
         partition_sources, reject_unknown_extensions, resolve_path, resolve_sdk_root,
         rgen_java_path, string_list, string_value, to_pascal_case, version_rank,
@@ -1466,6 +1486,7 @@ mod tests {
             "/sdk/platforms/android-36/android.jar",
             &["/repos/one.jar".to_owned()],
             &["/proj/src/Main.kt".to_owned()],
+            false,
         );
         assert_eq!(
             args,
@@ -1489,6 +1510,7 @@ mod tests {
             "/sdk/platforms/android-36/android.jar",
             &[],
             &["/proj/src/Main.kt".to_owned()],
+            false,
         );
         assert_eq!(
             args,
@@ -1502,5 +1524,60 @@ mod tests {
                 "/proj/src/Main.kt".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn kotlinc_android_invocation_enables_compose_plugin() {
+        let args = kotlinc_android_args(
+            "/proj/build/classes",
+            "/sdk/platforms/android-36/android.jar",
+            &[],
+            &["/proj/src/Main.kt".to_owned()],
+            true,
+        );
+        assert!(
+            args.contains(&"-plugin:androidx.compose.compiler.plugins.kotlin".to_owned()),
+            "compose flag must add the Compose compiler plugin, got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn kotlinc_android_invocation_omits_compose_plugin_when_disabled() {
+        let args = kotlinc_android_args(
+            "/proj/build/classes",
+            "/sdk/platforms/android-36/android.jar",
+            &[],
+            &["/proj/src/Main.kt".to_owned()],
+            false,
+        );
+        assert!(
+            !args.contains(&"-plugin:androidx.compose.compiler.plugins.kotlin".to_owned()),
+            "compose=false must not add the Compose compiler plugin"
+        );
+    }
+
+    #[test]
+    fn bool_value_parses_true() {
+        let v = serde_json::json!({ "compose": true });
+        assert!(bool_value(&v, "compose").unwrap());
+    }
+
+    #[test]
+    fn bool_value_parses_false() {
+        let v = serde_json::json!({ "compose": false });
+        assert!(!bool_value(&v, "compose").unwrap());
+    }
+
+    #[test]
+    fn bool_value_defaults_to_false_when_absent() {
+        let v = serde_json::json!({});
+        assert!(!bool_value(&v, "compose").unwrap());
+    }
+
+    #[test]
+    fn bool_value_rejects_non_boolean() {
+        let v = serde_json::json!({ "compose": "yes" });
+        let err = bool_value(&v, "compose").unwrap_err();
+        assert!(err.contains("true or false"), "{err}");
     }
 }

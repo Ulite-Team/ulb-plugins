@@ -371,6 +371,7 @@ mod bindings {
                             &platform_jar.to_string_lossy(),
                             &compile_classpath,
                             &kotlin_sources,
+                            false,
                         ),
                         cwd: ".".to_owned(),
                     }),
@@ -644,12 +645,16 @@ fn kotlinc_android_args(
     platform_jar: &str,
     classpath: &[String],
     sources: &[String],
+    compose: bool,
 ) -> Vec<String> {
     let mut args = vec!["-d".to_owned(), classes_dir.to_owned()];
     let mut cp = vec![platform_jar.to_owned()];
     cp.extend(classpath.iter().cloned());
     args.extend(["-cp".to_owned(), cp.join(":")]);
     args.extend(["-jvm-target".to_owned(), "17".to_owned()]);
+    if compose {
+        args.push("-plugin:androidx.compose.compiler.plugins.kotlin".to_owned());
+    }
     args.extend(sources.iter().cloned());
     args
 }
@@ -1104,6 +1109,7 @@ mod tests {
             "/sdk/platforms/android-34/android.jar",
             &["/repos/lib.jar".to_owned()],
             &["/proj/src/Foo.kt".to_owned()],
+            false,
         );
         assert!(args.contains(&"-d".to_owned()));
         assert!(args.contains(&"/proj/build/classes".to_owned()));
@@ -1111,6 +1117,7 @@ mod tests {
         assert!(args.contains(&"-jvm-target".to_owned()));
         assert!(args.contains(&"17".to_owned()));
         assert!(args.contains(&"/proj/src/Foo.kt".to_owned()));
+        assert!(!args.contains(&"-plugin:androidx.compose.compiler.plugins.kotlin".to_owned()));
     }
 
     #[test]

@@ -105,6 +105,7 @@ blocks:
 | `dimension` | string | which dimension this flavor belongs to; optional when exactly one dimension is declared |
 | `applicationIdSuffix` | string | appended to the namespace as `--rename-manifest-package` on `aapt2 link` |
 | `minSdk` | number | flavor-specific floor, overriding `android.minSdk` |
+| `sources` | list of strings | extra `.java`/`.kt` files compiled only into this flavor's variants, on top of `android.sources` |
 
 Example with flavors:
 
@@ -114,15 +115,27 @@ productFlavors {
 
   free {
     applicationIdSuffix = ".free"
+    sources = ["src/free/FreeBanner.java"]
   }
   paid {
     applicationIdSuffix = ".paid"
+    sources = ["src/paid/PaidFeatures.kt", "src/paid/License.java"]
   }
 }
 ```
 
 This produces four variants: `DebugFree`, `DebugPaid`, `ReleaseFree`,
 `ReleasePaid`.
+
+### Per-variant source layering
+
+A variant's effective source set is the module's base `android.sources`
+plus the `sources` of every flavor selected into that variant,
+deduplicated (first occurrence wins). Each variant's
+`compileJava<V>`/`compileKotlin<V>` tasks compile exactly that merged
+list, so a flavor can ship its own activities or features without them
+leaking into other flavors' APKs. Unsupported file extensions are
+rejected on the merged list, not just the base list.
 
 ### Variant naming
 

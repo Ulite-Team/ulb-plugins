@@ -205,8 +205,10 @@ mod bindings {
                 ],
             )?;
 
-            // Variant matrix.
-            let variants = compute_variants(&config)?;
+            // Variant matrix. The flavors map is returned alongside so the
+            // per-variant source merge below can resolve each selected
+            // flavor's `sources`.
+            let (variants, flavor_infos) = compute_variants(&config)?;
 
             // Signing (shared across all variants). Password files are
             // written once; each variant's signApk task reads the same files.
@@ -262,6 +264,26 @@ mod bindings {
 
             // Per-variant tasks.
             for variant in &variants {
+                // Source-set layering: the variant's effective sources are
+                // the module's base `android.sources` plus every selected
+                // flavor's `sources`, deduplicated with first occurrence
+                // winning. Extensions are re-validated on the merged list
+                // so a flavor cannot sneak in an unsupported file type.
+                let mut variant_all_sources = all_sources.clone();
+                for flavor_name in &variant.flavors {
+                    if let Some(info) = flavor_infos.get(flavor_name) {
+                        for raw in &info.sources {
+                            let resolved = resolve_path(project_dir, raw);
+                            if !variant_all_sources.contains(&resolved) {
+                                variant_all_sources.push(resolved);
+                            }
+                        }
+                    }
+                }
+                reject_unknown_extensions(&variant_all_sources)?;
+                let (variant_java_sources, variant_kotlin_sources) =
+                    partition_sources(&variant_all_sources);
+
                 let variant_build = build_dir.join(&variant.variant_dir);
                 let variant_classes_dir = variant_build.join("classes");
                 let variant_classes_jar = variant_build.join("classes.jar");
@@ -366,7 +388,7 @@ mod bindings {
                 // a multi-pass compilation (compile R.java → compile Kotlin
                 // → compile user Java).  Pure-Kotlin and pure-Java modules
                 // are unaffected.
-                let mut java_inputs = java_sources.clone();
+                let mut java_inputs = variant_java_sources.clone();
                 java_inputs.push(variant_rgen_java.to_string_lossy().into_owned());
                 run_tool_task(
                     &format!("compileJava{}", variant.name),
@@ -377,7 +399,7 @@ mod bindings {
                     compile_args(
                         &variant_classes_dir.to_string_lossy(),
                         &classpath,
-                        &java_sources,
+                        &variant_java_sources,
                         &variant_rgen_dir,
                         &variant_rgen_java,
                     ),
@@ -396,10 +418,10 @@ mod bindings {
                     None
                 };
                 let mut compile_tasks = vec![format!("compileJava{}", variant.name)];
-                if !kotlin_sources.is_empty() {
+                if !variant_kotlin_sources.is_empty() {
                     run_tool_task(
                         &format!("compileKotlin{}", variant.name),
-                        kotlin_sources.clone(),
+                        variant_kotlin_sources.clone(),
                         vec![variant_classes_dir.to_string_lossy().into_owned()],
                         vec![format!("compileJava{}", variant.name)],
                         AllowlistedTool::Kotlinc,
@@ -407,7 +429,7 @@ mod bindings {
                             &variant_classes_dir.to_string_lossy(),
                             &platform_jar.to_string_lossy(),
                             &classpath,
-                            &kotlin_sources,
+                            &variant_kotlin_sources,
                             compose_compiler_jar.as_deref(),
                         ),
                     )?;
@@ -550,6 +572,18 @@ mod bindings {
 /// A single build variant derived from the cartesian product of build types
 /// and product flavors.
 #[derive(Debug)]
+/// A flavor's parsed `productFlavors {}` entry: its dimension, effective
+/// SDK floor override, application-id suffix, and any flavor-specific
+/// source paths (raw; resolved against the project directory when a
+/// variant's sources are merged).
+struct FlavorInfo {
+    dimension: String,
+    min_sdk: Option<i64>,
+    application_id_suffix: String,
+    /// Raw (unresolved) source paths declared on the flavor.
+    sources: Vec<String>,
+}
+
 struct Variant {
     /// PascalCase variant name used as a task suffix (e.g. `Debug`,
     /// `Release`, `DebugFree`).
@@ -567,6 +601,9 @@ struct Variant {
     variant_dir: String,
     /// APK filename (e.g. `app-debug.apk`, `app-debugFree.apk`).
     apk_filename: String,
+    /// Names of the flavors selected into this variant, in product-flavors
+    /// map order. A build type without flavors selects none.
+    flavors: Vec<String>,
 }
 
 /// Computes the variant matrix from the module config's `buildTypes {}` and
@@ -583,7 +620,9 @@ struct Variant {
 /// Each variant's `minSdk` is the base `android.minSdk` overridden by the
 /// flavor's `minSdk` when present. The `applicationIdSuffix` comes from the
 /// flavor only.
-fn compute_variants(config: &serde_json::Value) -> Result<Vec<Variant>, String> {
+fn compute_variants(
+    config: &serde_json::Value,
+) -> Result<(Vec<Variant>, std::collections::BTreeMap<String, FlavorInfo>), String> {
     let android = config
         .get("android")
         .ok_or_else(|| "module config has no 'android' block".to_owned())?;
@@ -603,11 +642,6 @@ fn compute_variants(config: &serde_json::Value) -> Result<Vec<Variant>, String> 
     };
 
     // Product flavors: absent means no flavors (each build type is a variant).
-    struct FlavorInfo {
-        dimension: String,
-        min_sdk: Option<i64>,
-        application_id_suffix: String,
-    }
 
     let flavors: std::collections::BTreeMap<String, FlavorInfo> = match config.get("productFlavors")
     {
@@ -649,12 +683,29 @@ fn compute_variants(config: &serde_json::Value) -> Result<Vec<Variant>, String> 
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_owned();
+                let sources = match block_obj.get("sources") {
+                    Some(Value::Array(items)) => items
+                        .iter()
+                        .map(|item| {
+                            item.as_str().map(str::to_owned).ok_or_else(|| {
+                                format!("flavor '{name}' sources must be strings")
+                            })
+                        })
+                        .collect::<Result<Vec<String>, String>>()?,
+                    Some(_) => {
+                        return Err(format!(
+                            "flavor '{name}' sources must be a list of strings"
+                        ));
+                    }
+                    None => Vec::new(),
+                };
                 map.insert(
                     name.to_owned(),
                     FlavorInfo {
                         dimension,
                         min_sdk,
                         application_id_suffix,
+                        sources,
                     },
                 );
             }
@@ -685,6 +736,7 @@ fn compute_variants(config: &serde_json::Value) -> Result<Vec<Variant>, String> 
                 application_id_suffix: String::new(),
                 variant_dir,
                 apk_filename,
+                flavors: Vec::new(),
             });
         }
     } else {
@@ -706,12 +758,13 @@ fn compute_variants(config: &serde_json::Value) -> Result<Vec<Variant>, String> 
                     application_id_suffix: flavor_info.application_id_suffix.clone(),
                     variant_dir,
                     apk_filename,
+                    flavors: vec![flavor_name.clone()],
                 });
             }
         }
     }
 
-    Ok(variants)
+    Ok((variants, flavors))
 }
 
 /// Converts a lowercase identifier to PascalCase.
@@ -1372,6 +1425,51 @@ mod tests {
         assert_eq!(to_pascal_case("release"), "Release");
         assert_eq!(to_pascal_case("free"), "Free");
         assert_eq!(to_pascal_case("paid"), "Paid");
+
+        // Variants carry their selected flavor names so the per-variant
+        // source merge can find each flavor's `sources`.
+        let config = serde_json::json!({
+            "android": { "compileSdk": 36, "minSdk": 21 },
+            "buildTypes": {
+                "debug": {},
+                "release": {}
+            },
+            "productFlavors": {
+                "dimension": "tier",
+                "free": {
+                    "dimension": "tier",
+                    "sources": ["src/free/Free.kt"]
+                },
+                "paid": {
+                    "dimension": "tier"
+                }
+            }
+        });
+        let (variants, flavor_infos) = compute_variants(&config).expect("variants");
+        let free_debug = variants
+            .iter()
+            .find(|v| v.name == "DebugFree")
+            .expect("DebugFree variant");
+        assert_eq!(free_debug.flavors, ["free".to_owned()]);
+        assert_eq!(
+            flavor_infos
+                .get("free")
+                .expect("free flavor")
+                .sources,
+            ["src/free/Free.kt".to_owned()]
+        );
+        let paid_release = variants
+            .iter()
+            .find(|v| v.name == "ReleasePaid")
+            .expect("ReleasePaid variant");
+        assert_eq!(paid_release.flavors, ["paid".to_owned()]);
+
+        // A build type without flavors selects none.
+        let plain = serde_json::json!({
+            "android": { "compileSdk": 36, "minSdk": 21 }
+        });
+        let (variants, _) = compute_variants(&plain).expect("variants");
+        assert!(variants.iter().all(|v| v.flavors.is_empty()));
     }
 
     #[test]
@@ -1379,7 +1477,7 @@ mod tests {
         let config = json!({
             "android": { "compileSdk": 36, "minSdk": 21 }
         });
-        let variants = compute_variants(&config).expect("variants");
+        let (variants, _) = compute_variants(&config).expect("variants");
         assert_eq!(variants.len(), 2);
         assert_eq!(variants[0].name, "Debug");
         assert_eq!(variants[0].variant_dir, "debug");
@@ -1398,7 +1496,7 @@ mod tests {
                 "release": { "minifyEnabled": true }
             }
         });
-        let variants = compute_variants(&config).expect("variants");
+        let (variants, _) = compute_variants(&config).expect("variants");
         assert_eq!(variants.len(), 2);
         assert_eq!(variants[0].name, "Debug");
         assert_eq!(variants[1].name, "Release");
@@ -1418,7 +1516,7 @@ mod tests {
                 "paid": { "applicationIdSuffix": ".paid" }
             }
         });
-        let variants = compute_variants(&config).expect("variants");
+        let (variants, _) = compute_variants(&config).expect("variants");
         assert_eq!(variants.len(), 4);
         let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
         assert!(names.contains(&"DebugFree"));
@@ -1440,7 +1538,7 @@ mod tests {
                 "free": { "minSdk": 24 }
             }
         });
-        let variants = compute_variants(&config).expect("variants");
+        let (variants, _) = compute_variants(&config).expect("variants");
         assert_eq!(variants.len(), 2);
         let free = variants
             .iter()

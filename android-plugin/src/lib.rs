@@ -134,7 +134,6 @@ mod bindings {
                 return Err("the 'android' block declares no sources".to_owned());
             }
             reject_unknown_extensions(&all_sources)?;
-            let (_java_sources, _kotlin_sources) = partition_sources(&all_sources);
             let manifest = resolve_path(project_dir, &string_value(android, "manifest")?);
             let res_dir = resolve_path(project_dir, &string_value(android, "resDir")?);
 
@@ -838,9 +837,10 @@ fn compute_variants(
 
 /// Merges a variant's effective source list: the module's base sources plus
 /// every selected flavor's `sources` (raw paths resolved against the project
-/// directory), deduplicated with first occurrence winning. Supported
-/// extensions are re-validated on the merged list so a flavor cannot sneak
-/// in an unsupported file type.
+/// directory), deduplicated with first occurrence winning.  All returned paths
+/// are absolute (resolved against `project_dir`).  Supported extensions are
+/// re-validated on the merged list so a flavor cannot sneak in an unsupported
+/// file type.
 fn merge_variant_sources(
     base: &[String],
     project_dir: &str,
@@ -1322,9 +1322,11 @@ fn generate_buildconfig_source(params: &BuildConfigParams<'_>) -> String {
     out
 }
 
-/// Wraps a string value in Java string literal quotes.
+/// Wraps a string value in Java string literal quotes, escaping backslashes
+/// and double quotes to produce valid Java syntax.
 fn quote_string(value: &str) -> String {
-    format!("\"{value}\"")
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 /// The `jar` invocation that grafts the dex onto the seeded apk: everything
@@ -1959,7 +1961,6 @@ mod tests {
 
     #[test]
     fn merge_variant_sources_deduplicates_first_occurrence_wins() {
-        let _base = ["src/Main.java".to_owned()];
         let infos = std::collections::BTreeMap::from([(
             "free".to_owned(),
             FlavorInfo {
@@ -1983,6 +1984,33 @@ mod tests {
             [
                 "/proj/src/Main.java".to_owned(),
                 "/proj/src/free/Free.kt".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_variant_sources_appends_flavor_sources_without_overlap() {
+        let infos = std::collections::BTreeMap::from([(
+            "paid".to_owned(),
+            FlavorInfo {
+                dimension: "tier".to_owned(),
+                min_sdk: None,
+                application_id_suffix: ".paid".to_owned(),
+                sources: vec!["src/paid/Paid.java".to_owned()],
+            },
+        )]);
+        let merged = merge_variant_sources(
+            &["src/Main.java".to_owned()],
+            "/proj",
+            &["paid".to_owned()],
+            &infos,
+        )
+        .expect("merges");
+        assert_eq!(
+            merged,
+            [
+                "/proj/src/Main.java".to_owned(),
+                "/proj/src/paid/Paid.java".to_owned()
             ]
         );
     }
@@ -2058,6 +2086,29 @@ mod tests {
         assert_eq!(fields[0].java_type, "String");
         assert_eq!(fields[0].name, "API_KEY");
         assert_eq!(fields[0].initializer, "abc123");
+    }
+
+    #[test]
+    fn parse_build_config_fields_three_entries() {
+        // Three buildConfigField declarations produce:
+        // ["String", "A", "\"x\"", ["int", "B", "3"], ["boolean", "C", "true"]]
+        let android = serde_json::json!({
+            "buildConfigField": [
+                "String", "A", "\"x\"",
+                ["int", "B", "3"],
+                ["boolean", "C", "true"]
+            ],
+        });
+        let fields = parse_build_config_fields(&android);
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].java_type, "String");
+        assert_eq!(fields[0].name, "A");
+        assert_eq!(fields[1].java_type, "int");
+        assert_eq!(fields[1].name, "B");
+        assert_eq!(fields[1].initializer, "3");
+        assert_eq!(fields[2].java_type, "boolean");
+        assert_eq!(fields[2].name, "C");
+        assert_eq!(fields[2].initializer, "true");
     }
 
     #[test]

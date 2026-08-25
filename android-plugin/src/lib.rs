@@ -81,8 +81,8 @@ mod bindings {
     use crate::{
         android_jar, bool_value, classpath_bucket, compile_args, compute_variants, d8_args,
         find_compose_compiler_jar, highest_build_tools, int_value, kotlinc_android_args,
-        package_args, partition_sources, reject_unknown_extensions, resolve_path, resolve_sdk_root,
-        rgen_java_path, string_list, string_value,
+        merge_variant_sources, package_args, partition_sources, reject_unknown_extensions,
+        resolve_path, resolve_sdk_root, rgen_java_path, string_list, string_value,
     };
     use exports::ulite::ulb::ulb_plugin::{Guest, PluginManifest};
     use serde_json::Value;

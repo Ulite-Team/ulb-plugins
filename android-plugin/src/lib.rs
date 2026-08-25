@@ -1934,7 +1934,7 @@ mod tests {
 
     #[test]
     fn merge_variant_sources_deduplicates_first_occurrence_wins() {
-        let base = vec!["src/Main.java".to_owned()];
+        let _base = ["src/Main.java".to_owned()];
         let infos = std::collections::BTreeMap::from([(
             "free".to_owned(),
             FlavorInfo {

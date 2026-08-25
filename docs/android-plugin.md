@@ -42,6 +42,7 @@ following keys:
 | `manifest` | string | The `AndroidManifest.xml` `aapt2 link` merges and packages. Required. |
 | `resDir` | string | The `res/` directory `aapt2 compile` merges. Required. |
 | `sdkDir` | string, optional | Per-module SDK root, overriding the host-injected `androidSdkDir`. Relative paths resolve against the project directory. |
+| `buildConfigField` | list `[type, name, initializer]`, optional, repeatable | A custom field to emit in the generated `BuildConfig.java`. Each occurrence produces a `public static final` field. The triple's first element is the Java type, the second the field name, and the third the initializer expression (as a raw Java literal). |
 
 The values are resolved against the project directory the host injects
 (`projectDir`); absolute paths are used as written.
@@ -56,6 +57,8 @@ android {
   sources = ["src/Main.java"]
   manifest = "AndroidManifest.xml"
   resDir = "res"
+  buildConfigField ["String", "API_KEY", "\"abc123\""]
+  buildConfigField ["int", "MAX_RETRIES", "3"]
 }
 ```
 
@@ -177,6 +180,54 @@ directory. Use `env()` to pull values from environment variables rather
 than embedding them in source-controlled files. The build directory
 should be in `.gitignore`.
 
+## BuildConfig generation
+
+`configure` always generates a `BuildConfig.java` source file for every
+variant. The file lives under
+`build/<variant>/generated/buildconfig/<namespace>/BuildConfig.java` and is
+added to `javac`'s `-sourcepath` so compilation resolves it automatically.
+
+### Default fields
+
+Every generated `BuildConfig.java` includes these nine fields, populated
+from the module's `android {}` block and the variant's effective values:
+
+| Field | Type | Source |
+|---|---|---|
+| `APPLICATION_ID` | `String` | `namespace` + optional `applicationIdSuffix` from the selected flavor |
+| `BUILD_TYPE` | `String` | the build-type component of the variant name (`debug`, `release`, …) |
+| `DEBUG` | `boolean` | `true` when the build type is `debug`, `false` otherwise |
+| `FLAVOR` | `String` | the empty string for default build-type-only variants, the flavor name otherwise |
+| `VERSION_CODE` | `int` | `android.versionCode` |
+| `VERSION_NAME` | `String` | `android.versionName` |
+| `MIN_SDK_VERSION` | `int` | `minSdk` (with flavor override when present) |
+| `TARGET_SDK_VERSION` | `int` | `targetSdk` (defaulting to `compileSdk`) |
+| `COMPILE_SDK_VERSION` | `int` | `compileSdk` |
+
+### User-defined fields
+
+The optional `buildConfigField` key in the `android {}` block declares
+additional fields. Each entry is a list triple `[javaType, name,
+initializer]`:
+
+```text
+buildConfigField ["String", "API_KEY", "\"abc123\""]
+buildConfigField ["int", "MAX_RETRIES", "3"]
+```
+
+The first element is the Java type (e.g. `String`, `int`, `boolean`),
+the second is the field name (must be a valid Java identifier), and the
+third is the initializer expression emitted verbatim as a Java literal.
+Invalid triples (fewer or more than three elements) are silently ignored.
+
+### Task ordering
+
+`generateBuildConfig<V>` depends on `prepareBuildDir` and produces the
+source file. `compileJava<V>` depends on `generateBuildConfig<V>` so the
+file exists before `javac` runs. The buildconfig directory is included in
+`-sourcepath` alongside the `R.java` directory, so references to
+`BuildConfig.FIELD` in source files resolve at compile time.
+
 ## Toolchain discovery
 
 `configure` performs the discovery the packaging tasks consume, and fails
@@ -200,6 +251,7 @@ the injected `projectDir`:
 - `build/android/res.zip` — the merged resources, `aapt2 compile` output.
 - `build/<variant>/resources.apk` — the linked resources APK for the variant.
 - `build/<variant>/R/` — the generated `R.java` for the variant.
+- `build/<variant>/generated/buildconfig/<namespace>/BuildConfig.java` — the generated BuildConfig source for the variant.
 - `build/<variant>/classes` — the compiled `.class` files for the variant.
 - `build/<variant>/classes.jar` — the classes archived for d8.
 - `build/<variant>/dex/` — the d8 output for the variant.
@@ -222,9 +274,10 @@ Per-variant tasks (suffixed with PascalCase variant name):
 |---|---|---|
 | `prepareApk<V>` | `mkdir` | `mkdir -p <build>/<variant>/`. |
 | `prepareDex<V>` | `mkdir` | `mkdir -p <build>/<variant>/dex/`. |
+| `generateBuildConfig<V>` | `write_file` | Writes `<build>/<variant>/generated/buildconfig/<namespace>/BuildConfig.java` containing nine default fields (APPLICATION_ID, BUILD_TYPE, DEBUG, FLAVOR, VERSION_CODE, VERSION_NAME, MIN_SDK_VERSION, TARGET_SDK_VERSION, COMPILE_SDK_VERSION) plus any `buildConfigField` entries declared in the `android {}` block. Depends on `prepareBuildDir`. |
 | `linkResources<V>` | `aapt2` | `aapt2 link -o <variant>/resources.apk --manifest <manifest> -I <android.jar> --java <variant>/R --custom-package <ns> --min-sdk-version <minSdk> --target-sdk-version <targetSdk> [--rename-manifest-package <ns><suffix>] <res.zip>`. |
 | `seedApk<V>` | `cp` | `cp <variant>/resources.apk <variant>/app-<variant>.apk`. |
-| `compile<V>` | `javac` | `javac --release 17 -d <variant>/classes -cp <android.jar>:<classpath> -sourcepath <variant>/R <sources> <variant>/R/<namespace>/R.java`. |
+| `compile<V>` | `javac` | `javac --release 17 -d <variant>/classes -cp <android.jar>:<classpath> -sourcepath <variant>/R:<variant>/generated/buildconfig <sources> <variant>/R/<namespace>/R.java`. Depends on `generateBuildConfig<V>`. |
 | `jarClasses<V>` | `jar` | `jar cf <variant>/classes.jar -C <variant>/classes .`. |
 | `compileDex<V>` | `java` | `java -cp <build-tools>/lib/d8.jar com.android.tools.r8.D8 --lib <android.jar> --min-api <minSdk> --output <variant>/dex <variant>/classes.jar`. |
 | `packageApk<V>` | `jar` | `jar uf <variant>/app-<variant>.apk -C <variant>/dex .`. |

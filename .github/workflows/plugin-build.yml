@@ -943,7 +943,7 @@ jobs:
           }
           first="$(build)"
           echo "$first"
-          grep -q '18 ran, 0 up-to-date' <<<"$first"
+          grep -q '20 ran, 0 up-to-date' <<<"$first"
           # The apk is complete: manifest, merged resources, resource table,
           # and the dex grafted onto the aapt2 output.
           unzip -l /tmp/android/build/android/debug/app-debug.apk > /tmp/android/apk.list
@@ -956,15 +956,15 @@ jobs:
           # up-to-date: derived paths resolve against the injected
           # projectDir, never the invocation directory.
           cd /
-          grep -q '0 ran, 18 up-to-date' <<<"$(build)"
+          grep -q '0 ran, 20 up-to-date' <<<"$(build)"
           # A resource change reruns the resource chain and everything that
-          # consumes it, but not the mkdirs.
+          # consumes it, but not the mkdirs or BuildConfig generation.
           cd /tmp/android
           sed -i 's/Uliab CI Example/Uliab CI Example v2/' res/values/strings.xml
-          grep -q '13 ran, 5 up-to-date' <<<"$(build)"
+          grep -q '15 ran, 5 up-to-date' <<<"$(build)"
           # A source change reruns compile and the dex/package chain only.
           sed -i 's|setContentView(R.layout.activity_main);|setContentView(R.layout.activity_main); // v2|' src/Main.java
-          grep -q '8 ran, 10 up-to-date' <<<"$(build)"
+          grep -q '8 ran, 12 up-to-date' <<<"$(build)"
           # A compile level the SDK does not have must fail configure, not
           # javac, proving discovery ran inside the plugin.
           sed -i 's/compileSdk = 36/compileSdk = 99/' build.ulb
@@ -1057,7 +1057,7 @@ jobs:
           }
           first_kt="$(build_kt)"
           echo "$first_kt"
-          grep -q '20 ran, 0 up-to-date' <<<"$first_kt"
+          grep -q '22 ran, 0 up-to-date' <<<"$first_kt"
           unzip -l /tmp/android-kt/build/android/debug/app-debug.apk > /tmp/android-kt/apk.list
           grep -q 'AndroidManifest.xml' /tmp/android-kt/apk.list
           grep -q 'classes.dex' /tmp/android-kt/apk.list

@@ -38,7 +38,7 @@ following keys:
 | `minSdk` | integer | The default minimum API level; `aapt2 link` records it and `d8` uses it as `--min-api`. A per-flavor `minSdk` in `productFlavors {}` overrides this. Required. |
 | `targetSdk` | integer, optional | The default target API level; defaults to `compileSdk`. A supplied value that is not an integer is a configure error. |
 | `namespace` | string | The package the generated `R` class lives in, handed to `aapt2 link` as `--custom-package`. Required. |
-| `sources` | list of strings | `.java` files to compile. At least one entry is required. Kotlin sources are not supported yet. |
+| `sources` | list of strings | `.java`/`.kt` files to compile. At least one entry is required. |
 | `manifest` | string | The `AndroidManifest.xml` `aapt2 link` merges and packages. Required. |
 | `resDir` | string | The `res/` directory `aapt2 compile` merges. Required. |
 | `sdkDir` | string, optional | Per-module SDK root, overriding the host-injected `androidSdkDir`. Relative paths resolve against the project directory. |
@@ -135,7 +135,9 @@ deduplicated (first occurrence wins). Each variant's
 `compileJava<V>`/`compileKotlin<V>` tasks compile exactly that merged
 list, so a flavor can ship its own activities or features without them
 leaking into other flavors' APKs. Unsupported file extensions are
-rejected on the merged list, not just the base list.
+rejected on the merged list, not just the base list. The kotlin-stdlib
+jar is dexed into a variant only when that variant's merged sources
+contain `.kt` files.
 
 ### Variant naming
 

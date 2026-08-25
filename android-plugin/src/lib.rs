@@ -79,10 +79,11 @@ mod bindings {
     });
 
     use crate::{
-        android_jar, bool_value, classpath_bucket, compile_args, compute_variants, d8_args,
-        find_compose_compiler_jar, highest_build_tools, int_value, kotlinc_android_args,
-        merge_variant_sources, package_args, partition_sources, reject_unknown_extensions,
-        resolve_path, resolve_sdk_root, rgen_java_path, string_list, string_value,
+        BuildConfigParams, android_jar, bool_value, classpath_bucket, compile_args,
+        compute_variants, d8_args, find_compose_compiler_jar, generate_buildconfig_source,
+        highest_build_tools, int_value, kotlinc_android_args, merge_variant_sources, package_args,
+        parse_build_config_fields, partition_sources, reject_unknown_extensions, resolve_path,
+        resolve_sdk_root, rgen_java_path, string_list, string_value, to_pascal_case,
     };
     use exports::ulite::ulb::ulb_plugin::{Guest, PluginManifest};
     use serde_json::Value;
@@ -133,7 +134,6 @@ mod bindings {
                 return Err("the 'android' block declares no sources".to_owned());
             }
             reject_unknown_extensions(&all_sources)?;
-            let (java_sources, kotlin_sources) = partition_sources(&all_sources);
             let manifest = resolve_path(project_dir, &string_value(android, "manifest")?);
             let res_dir = resolve_path(project_dir, &string_value(android, "resDir")?);
 
@@ -199,6 +199,10 @@ mod bindings {
             // per-variant source merge below can resolve each selected
             // flavor's `sources`.
             let (variants, flavor_infos) = compute_variants(&config)?;
+
+            // User-defined BuildConfig fields from `buildConfigField`
+            // triples inside the `android {}` block.
+            let build_config_fields = parse_build_config_fields(android);
 
             // Signing (shared across all variants). Password files are
             // written once; each variant's signApk task reads the same files.
@@ -319,6 +323,68 @@ mod bindings {
                         variant_dex_dir.to_string_lossy().into_owned(),
                     ],
                 )?;
+
+                // BuildConfig.java generation: a WriteFile task that
+                // produces the source file for javac. The file lives under
+                // <build>/<variant>/generated/buildconfig/<pkg>/ so the
+                // namespace's dot segments map to the expected directory
+                // structure.
+                let buildconfig_pkg_dir = namespace.replace('.', "/");
+                let buildconfig_dir = variant_build
+                    .join("generated")
+                    .join("buildconfig")
+                    .join(&buildconfig_pkg_dir);
+                let buildconfig_java = buildconfig_dir.join("BuildConfig.java");
+                let application_id = format!("{}{}", namespace, variant.application_id_suffix);
+                let flavor_name = variant.flavors.first().cloned().unwrap_or_default();
+                let build_type_lower = {
+                    // Derive the lowercase build type from the variant name:
+                    // "DebugFree" → the build type is the first PascalCase
+                    // component that is NOT a flavor name.  For simple
+                    // debug/release, the entire name IS the build type.
+                    if variant.flavors.is_empty() {
+                        variant.name.to_lowercase()
+                    } else {
+                        // Strip each flavor suffix (PascalCase) from the
+                        // variant name to recover the build type.
+                        let mut remainder = variant.name.as_str();
+                        for f in &variant.flavors {
+                            let pascal = to_pascal_case(f);
+                            if let Some(pos) = remainder.rfind(&pascal) {
+                                remainder = &remainder[..pos];
+                            }
+                        }
+                        remainder.to_lowercase()
+                    }
+                };
+                let is_debug = build_type_lower == "debug";
+                let android_version_code = int_value(android, "versionCode").unwrap_or(1);
+                let android_version_name = string_value(android, "versionName").unwrap_or_default();
+                let compile_sdk = int_value(android, "compileSdk")?;
+                let buildconfig_source = generate_buildconfig_source(&BuildConfigParams {
+                    namespace: &namespace,
+                    application_id: &application_id,
+                    build_type: &build_type_lower,
+                    debug: is_debug,
+                    flavor: &flavor_name,
+                    version_code: android_version_code,
+                    version_name: &android_version_name,
+                    min_sdk: variant.min_sdk,
+                    target_sdk: variant.target_sdk,
+                    compile_sdk,
+                    user_fields: &build_config_fields,
+                });
+                task_registrar::register_task(&Task {
+                    name: format!("generateBuildConfig{}", variant.name),
+                    inputs: vec![],
+                    outputs: vec![buildconfig_java.to_string_lossy().into_owned()],
+                    depends_on: vec!["prepareBuildDir".to_owned()],
+                    action: Action::WriteFile(write_file_args(
+                        &buildconfig_java.to_string_lossy(),
+                        &buildconfig_source,
+                    )),
+                })?;
+
                 run_tool_task(
                     &format!("linkResources{}", variant.name),
                     vec![res_zip.to_string_lossy().into_owned(), manifest.clone()],
@@ -388,11 +454,15 @@ mod bindings {
                 // are unaffected.
                 let mut java_inputs = variant_java_sources.clone();
                 java_inputs.push(variant_rgen_java.to_string_lossy().into_owned());
+                let variant_buildconfig_dir = variant_build.join("generated").join("buildconfig");
                 run_tool_task(
                     &format!("compileJava{}", variant.name),
                     java_inputs,
                     vec![variant_classes_dir.to_string_lossy().into_owned()],
-                    vec![format!("linkResources{}", variant.name)],
+                    vec![
+                        format!("linkResources{}", variant.name),
+                        format!("generateBuildConfig{}", variant.name),
+                    ],
                     AllowlistedTool::Javac,
                     compile_args(
                         &variant_classes_dir.to_string_lossy(),
@@ -400,6 +470,7 @@ mod bindings {
                         &variant_java_sources,
                         &variant_rgen_dir,
                         &variant_rgen_java,
+                        Some(&variant_buildconfig_dir),
                     ),
                 )?;
 
@@ -571,6 +642,7 @@ mod bindings {
 /// SDK floor override, application-id suffix, and any flavor-specific
 /// source paths (raw; resolved against the project directory when a
 /// variant's sources are merged).
+#[derive(Debug)]
 struct FlavorInfo {
     dimension: String,
     min_sdk: Option<i64>,
@@ -685,15 +757,13 @@ fn compute_variants(
                     Some(Value::Array(items)) => items
                         .iter()
                         .map(|item| {
-                            item.as_str().map(str::to_owned).ok_or_else(|| {
-                                format!("flavor '{name}' sources must be strings")
-                            })
+                            item.as_str()
+                                .map(str::to_owned)
+                                .ok_or_else(|| format!("flavor '{name}' sources must be strings"))
                         })
                         .collect::<Result<Vec<String>, String>>()?,
                     Some(_) => {
-                        return Err(format!(
-                            "flavor '{name}' sources must be a list of strings"
-                        ));
+                        return Err(format!("flavor '{name}' sources must be a list of strings"));
                     }
                     None => Vec::new(),
                 };
@@ -767,16 +837,20 @@ fn compute_variants(
 
 /// Merges a variant's effective source list: the module's base sources plus
 /// every selected flavor's `sources` (raw paths resolved against the project
-/// directory), deduplicated with first occurrence winning. Supported
-/// extensions are re-validated on the merged list so a flavor cannot sneak
-/// in an unsupported file type.
+/// directory), deduplicated with first occurrence winning.  All returned paths
+/// are absolute (resolved against `project_dir`).  Supported extensions are
+/// re-validated on the merged list so a flavor cannot sneak in an unsupported
+/// file type.
 fn merge_variant_sources(
     base: &[String],
     project_dir: &str,
     selected_flavors: &[String],
     flavor_infos: &std::collections::BTreeMap<String, FlavorInfo>,
 ) -> Result<Vec<String>, String> {
-    let mut merged = base.to_vec();
+    let mut merged: Vec<String> = base
+        .iter()
+        .map(|path| resolve_path(project_dir, path))
+        .collect();
     for name in selected_flavors {
         if let Some(info) = flavor_infos.get(name) {
             for raw in &info.sources {
@@ -1017,6 +1091,7 @@ fn compile_args(
     sources: &[String],
     rgen_dir: &std::path::Path,
     rgen_java: &std::path::Path,
+    buildconfig_dir: Option<&std::path::Path>,
 ) -> Vec<String> {
     let mut args = vec![
         "--release".to_owned(),
@@ -1025,10 +1100,15 @@ fn compile_args(
         classes_dir.to_owned(),
     ];
     args.extend(["-cp".to_owned(), classpath.join(":")]);
-    args.extend([
-        "-sourcepath".to_owned(),
-        rgen_dir.to_string_lossy().into_owned(),
-    ]);
+    // Build the -sourcepath: always includes the R directory for R.java;
+    // when present, also includes the generated BuildConfig source directory
+    // so javac resolves the BuildConfig class automatically.
+    let mut sourcepath = rgen_dir.to_string_lossy().into_owned();
+    if let Some(bc_dir) = buildconfig_dir {
+        sourcepath.push(':');
+        sourcepath.push_str(&bc_dir.to_string_lossy());
+    }
+    args.extend(["-sourcepath".to_owned(), sourcepath]);
     args.extend(sources.iter().cloned());
     args.push(rgen_java.to_string_lossy().into_owned());
     args
@@ -1120,6 +1200,135 @@ fn optional_int(android: &serde_json::Value, key: &str) -> Result<Option<i64>, S
     }
 }
 
+/// A single user-defined BuildConfig field: its Java type name, constant
+/// name, and the literal initializer expression (including quotes for
+/// strings, e.g. `"\"abc123\""`).
+struct BuildConfigField {
+    java_type: String,
+    name: String,
+    initializer: String,
+}
+
+/// Parses `buildConfigField` entries from the `android {}` block. Each entry
+/// is a list triple `["TYPE", "NAME", "INITIALIZER"]`.
+///
+/// The evaluator's `insert_accumulating` flattens repeated list-valued keys.
+/// When a single `buildConfigField` is declared, the value is a flat
+/// 3-element list. When two or more are declared, the first triple's
+/// elements remain as top-level strings and subsequent triples arrive as
+/// nested sub-arrays — e.g. `["String", "A", "x", ["int", "B", "3"]]`.
+/// This function walks the array and extracts triples from both forms.
+fn parse_build_config_fields(android: &serde_json::Value) -> Vec<BuildConfigField> {
+    let mut fields = Vec::new();
+    if let Some(obj) = android.as_object()
+        && let Some(arr) = obj.get("buildConfigField").and_then(|v| v.as_array())
+    {
+        let mut i = 0;
+        while i < arr.len() {
+            if let serde_json::Value::Array(sub) = &arr[i]
+                && sub.len() == 3
+            {
+                let java_type = sub[0].as_str().unwrap_or("Object").to_owned();
+                let name = sub[1].as_str().unwrap_or("_UNKNOWN_").to_owned();
+                let initializer = sub[2].as_str().unwrap_or("null").to_owned();
+                fields.push(BuildConfigField {
+                    java_type,
+                    name,
+                    initializer,
+                });
+                i += 1;
+                continue;
+            }
+            if i + 2 < arr.len()
+                && let (Some(a), Some(b), Some(c)) =
+                    (arr[i].as_str(), arr[i + 1].as_str(), arr[i + 2].as_str())
+            {
+                fields.push(BuildConfigField {
+                    java_type: a.to_owned(),
+                    name: b.to_owned(),
+                    initializer: c.to_owned(),
+                });
+                i += 3;
+                continue;
+            }
+            i += 1;
+        }
+    }
+    fields
+}
+
+/// Parameters for generating a single variant's `BuildConfig.java`.
+struct BuildConfigParams<'a> {
+    namespace: &'a str,
+    application_id: &'a str,
+    build_type: &'a str,
+    debug: bool,
+    flavor: &'a str,
+    version_code: i64,
+    version_name: &'a str,
+    min_sdk: i64,
+    target_sdk: i64,
+    compile_sdk: i64,
+    user_fields: &'a [BuildConfigField],
+}
+
+/// Generates the Java source for `BuildConfig.java` given the module's
+/// android block values, the effective variant info, and any user-defined
+/// fields.
+fn generate_buildconfig_source(params: &BuildConfigParams<'_>) -> String {
+    let mut out = String::new();
+    out.push_str("package ");
+    out.push_str(params.namespace);
+    out.push_str(";\n\n");
+    out.push_str("public final class BuildConfig {\n");
+
+    let default_fields = [
+        (
+            "String",
+            "APPLICATION_ID",
+            quote_string(params.application_id),
+        ),
+        ("String", "BUILD_TYPE", quote_string(params.build_type)),
+        ("boolean", "DEBUG", params.debug.to_string()),
+        ("String", "FLAVOR", quote_string(params.flavor)),
+        ("int", "VERSION_CODE", params.version_code.to_string()),
+        ("String", "VERSION_NAME", quote_string(params.version_name)),
+        ("int", "MIN_SDK_VERSION", params.min_sdk.to_string()),
+        ("int", "TARGET_SDK_VERSION", params.target_sdk.to_string()),
+        ("int", "COMPILE_SDK_VERSION", params.compile_sdk.to_string()),
+    ];
+
+    for (java_type, name, init) in &default_fields {
+        out.push_str("  public static final ");
+        out.push_str(java_type);
+        out.push(' ');
+        out.push_str(name);
+        out.push_str(" = ");
+        out.push_str(init);
+        out.push_str(";\n");
+    }
+
+    for field in params.user_fields {
+        out.push_str("  public static final ");
+        out.push_str(&field.java_type);
+        out.push(' ');
+        out.push_str(&field.name);
+        out.push_str(" = ");
+        out.push_str(&field.initializer);
+        out.push_str(";\n");
+    }
+
+    out.push_str("}\n");
+    out
+}
+
+/// Wraps a string value in Java string literal quotes, escaping backslashes
+/// and double quotes to produce valid Java syntax.
+fn quote_string(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
 /// The `jar` invocation that grafts the dex onto the seeded apk: everything
 /// under the d8 output directory, so a module that overflows a single dex
 /// file (d8 then emits `classes.dex`, `classes2.dex`, ...) gets every
@@ -1137,10 +1346,12 @@ fn package_args(apk: &std::path::Path, dex_dir: &std::path::Path) -> Vec<String>
 #[cfg(test)]
 mod tests {
     use super::{
-        android_jar, bool_value, classpath_bucket, compile_args, compute_variants, d8_args,
-        find_compose_compiler_jar, highest_build_tools, int_value, kotlinc_android_args,
-        optional_int, package_args, partition_sources, reject_unknown_extensions, resolve_path,
-        resolve_sdk_root, rgen_java_path, string_list, string_value, to_pascal_case, version_rank,
+        BuildConfigField, BuildConfigParams, FlavorInfo, android_jar, bool_value, classpath_bucket,
+        compile_args, compute_variants, d8_args, find_compose_compiler_jar,
+        generate_buildconfig_source, highest_build_tools, int_value, kotlinc_android_args,
+        merge_variant_sources, optional_int, package_args, parse_build_config_fields,
+        partition_sources, reject_unknown_extensions, resolve_path, resolve_sdk_root,
+        rgen_java_path, string_list, string_value, to_pascal_case, version_rank,
     };
     use serde_json::json;
     use std::path::PathBuf;
@@ -1181,6 +1392,7 @@ mod tests {
             &["/proj/src/Main.java".to_owned()],
             rgen,
             &rgen_java_path(rgen, "com.example.ulite"),
+            None,
         );
         assert_eq!(
             args,
@@ -1208,6 +1420,7 @@ mod tests {
             &["/proj/src/Main.java".to_owned()],
             rgen,
             &rgen_java_path(rgen, "com.example.ulite"),
+            None,
         );
         assert_eq!(
             args,
@@ -1483,10 +1696,7 @@ mod tests {
             .expect("DebugFree variant");
         assert_eq!(free_debug.flavors, ["free".to_owned()]);
         assert_eq!(
-            flavor_infos
-                .get("free")
-                .expect("free flavor")
-                .sources,
+            flavor_infos.get("free").expect("free flavor").sources,
             ["src/free/Free.kt".to_owned()]
         );
         let paid_release = variants
@@ -1751,7 +1961,6 @@ mod tests {
 
     #[test]
     fn merge_variant_sources_deduplicates_first_occurrence_wins() {
-        let base = vec!["src/Main.java".to_owned()];
         let infos = std::collections::BTreeMap::from([(
             "free".to_owned(),
             FlavorInfo {
@@ -1761,8 +1970,8 @@ mod tests {
                 sources: vec!["src/free/Free.kt".to_owned()],
             },
         )]);
-        // The base already lists the flavor's file via its absolute-ish
-        // spelling; the raw flavor path resolves onto it and is dropped.
+        // The base already lists the flavor's file; the resolved flavor
+        // path matches the resolved base path, so dedup keeps only the first.
         let merged = merge_variant_sources(
             &["src/Main.java".to_owned(), "src/free/Free.kt".to_owned()],
             "/proj",
@@ -1773,8 +1982,35 @@ mod tests {
         assert_eq!(
             merged,
             [
-                "src/Main.java".to_owned(),
-                "src/free/Free.kt".to_owned()
+                "/proj/src/Main.java".to_owned(),
+                "/proj/src/free/Free.kt".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_variant_sources_appends_flavor_sources_without_overlap() {
+        let infos = std::collections::BTreeMap::from([(
+            "paid".to_owned(),
+            FlavorInfo {
+                dimension: "tier".to_owned(),
+                min_sdk: None,
+                application_id_suffix: ".paid".to_owned(),
+                sources: vec!["src/paid/Paid.java".to_owned()],
+            },
+        )]);
+        let merged = merge_variant_sources(
+            &["src/Main.java".to_owned()],
+            "/proj",
+            &["paid".to_owned()],
+            &infos,
+        )
+        .expect("merges");
+        assert_eq!(
+            merged,
+            [
+                "/proj/src/Main.java".to_owned(),
+                "/proj/src/paid/Paid.java".to_owned()
             ]
         );
     }
@@ -1815,5 +2051,187 @@ mod tests {
         let err = merge_variant_sources(&[], "/proj", &["evil".to_owned()], &infos)
             .expect_err("unsupported extension");
         assert!(err.contains("neither a .java nor a .kt"), "{err}");
+    }
+
+    #[test]
+    fn parse_build_config_fields_extracts_triples() {
+        // With two buildConfigField entries, insert_accumulating produces a
+        // flat first triple + a nested second triple:
+        // ["String", "API_KEY", "\"abc123\"", ["boolean", "FEATURE_FLAG", "true"]]
+        let android = serde_json::json!({
+            "compileSdk": 36,
+            "buildConfigField": [
+                "String", "API_KEY", "\"abc123\"",
+                ["boolean", "FEATURE_FLAG", "true"]
+            ],
+            "namespace": "com.example",
+        });
+        let fields = parse_build_config_fields(&android);
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].java_type, "String");
+        assert_eq!(fields[0].name, "API_KEY");
+        assert_eq!(fields[0].initializer, "\"abc123\"");
+        assert_eq!(fields[1].java_type, "boolean");
+        assert_eq!(fields[1].name, "FEATURE_FLAG");
+        assert_eq!(fields[1].initializer, "true");
+    }
+
+    #[test]
+    fn parse_build_config_fields_single_triple() {
+        let android = serde_json::json!({
+            "buildConfigField": ["String", "API_KEY", "abc123"],
+        });
+        let fields = parse_build_config_fields(&android);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].java_type, "String");
+        assert_eq!(fields[0].name, "API_KEY");
+        assert_eq!(fields[0].initializer, "abc123");
+    }
+
+    #[test]
+    fn parse_build_config_fields_three_entries() {
+        // Three buildConfigField declarations produce:
+        // ["String", "A", "\"x\"", ["int", "B", "3"], ["boolean", "C", "true"]]
+        let android = serde_json::json!({
+            "buildConfigField": [
+                "String", "A", "\"x\"",
+                ["int", "B", "3"],
+                ["boolean", "C", "true"]
+            ],
+        });
+        let fields = parse_build_config_fields(&android);
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].java_type, "String");
+        assert_eq!(fields[0].name, "A");
+        assert_eq!(fields[1].java_type, "int");
+        assert_eq!(fields[1].name, "B");
+        assert_eq!(fields[1].initializer, "3");
+        assert_eq!(fields[2].java_type, "boolean");
+        assert_eq!(fields[2].name, "C");
+        assert_eq!(fields[2].initializer, "true");
+    }
+
+    #[test]
+    fn parse_build_config_fields_ignores_non_triple_values() {
+        let android = serde_json::json!({
+            "buildConfigField": "not a list",
+        });
+        let fields = parse_build_config_fields(&android);
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn parse_build_config_fields_returns_empty_when_absent() {
+        let android = serde_json::json!({ "compileSdk": 36 });
+        assert!(parse_build_config_fields(&android).is_empty());
+    }
+
+    #[test]
+    fn generate_buildconfig_source_produces_valid_java() {
+        let source = generate_buildconfig_source(&BuildConfigParams {
+            namespace: "com.example.app",
+            application_id: "com.example.app",
+            build_type: "debug",
+            debug: true,
+            flavor: "",
+            version_code: 1,
+            version_name: "1.0",
+            min_sdk: 21,
+            target_sdk: 33,
+            compile_sdk: 36,
+            user_fields: &[],
+        });
+        assert!(source.contains("package com.example.app;"));
+        assert!(source.contains("public final class BuildConfig"));
+        assert!(
+            source.contains("public static final String APPLICATION_ID = \"com.example.app\";")
+        );
+        assert!(source.contains("public static final String BUILD_TYPE = \"debug\";"));
+        assert!(source.contains("public static final boolean DEBUG = true;"));
+        assert!(source.contains("public static final String FLAVOR = \"\";"));
+        assert!(source.contains("public static final int VERSION_CODE = 1;"));
+        assert!(source.contains("public static final String VERSION_NAME = \"1.0\";"));
+        assert!(source.contains("public static final int MIN_SDK_VERSION = 21;"));
+        assert!(source.contains("public static final int TARGET_SDK_VERSION = 33;"));
+        assert!(source.contains("public static final int COMPILE_SDK_VERSION = 36;"));
+    }
+
+    #[test]
+    fn generate_buildconfig_source_includes_user_fields() {
+        let user_fields = vec![
+            BuildConfigField {
+                java_type: "String".to_owned(),
+                name: "API_KEY".to_owned(),
+                initializer: "\"secret\"".to_owned(),
+            },
+            BuildConfigField {
+                java_type: "int".to_owned(),
+                name: "MAX_RETRIES".to_owned(),
+                initializer: "3".to_owned(),
+            },
+        ];
+        let source = generate_buildconfig_source(&BuildConfigParams {
+            namespace: "com.example",
+            application_id: "com.example",
+            build_type: "release",
+            debug: false,
+            flavor: "paid",
+            version_code: 42,
+            version_name: "2.0",
+            min_sdk: 24,
+            target_sdk: 34,
+            compile_sdk: 36,
+            user_fields: &user_fields,
+        });
+        assert!(source.contains("public static final String API_KEY = \"secret\";"));
+        assert!(source.contains("public static final int MAX_RETRIES = 3;"));
+        assert!(source.contains("public static final String FLAVOR = \"paid\";"));
+        assert!(source.contains("public static final boolean DEBUG = false;"));
+        assert!(source.contains("public static final int VERSION_CODE = 42;"));
+    }
+
+    #[test]
+    fn generate_buildconfig_source_includes_application_id_suffix() {
+        let source = generate_buildconfig_source(&BuildConfigParams {
+            namespace: "com.example",
+            application_id: "com.example.free",
+            build_type: "debug",
+            debug: true,
+            flavor: "free",
+            version_code: 1,
+            version_name: "",
+            min_sdk: 21,
+            target_sdk: 33,
+            compile_sdk: 36,
+            user_fields: &[],
+        });
+        assert!(
+            source.contains("APPLICATION_ID = \"com.example.free\""),
+            "APPLICATION_ID should include suffix: {source}"
+        );
+    }
+
+    #[test]
+    fn compile_args_includes_buildconfig_dir_on_sourcepath() {
+        let rgen = std::path::Path::new("/proj/build/android/R");
+        let bc = std::path::Path::new("/proj/build/android/generated/buildconfig");
+        let args = compile_args(
+            "/proj/build/classes",
+            &["/sdk/platforms/android-36/android.jar".to_owned()],
+            &["/proj/src/Main.java".to_owned()],
+            rgen,
+            &rgen_java_path(rgen, "com.example"),
+            Some(bc),
+        );
+        let sp_idx = args.iter().position(|a| a == "-sourcepath").unwrap();
+        let sp_value = &args[sp_idx + 1];
+        assert!(
+            sp_value.contains("/proj/build/android/generated/buildconfig"),
+            "sourcepath must include buildconfig dir: {sp_value}"
+        );
+        assert!(
+            sp_value.starts_with("/proj/build/android/R:"),
+            "sourcepath must start with R dir: {sp_value}"
+        );
     }
 }

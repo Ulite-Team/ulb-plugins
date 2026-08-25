@@ -81,8 +81,8 @@ mod bindings {
     use crate::{
         android_jar, bool_value, classpath_bucket, compile_args, compute_variants, d8_args,
         find_compose_compiler_jar, highest_build_tools, int_value, kotlinc_android_args,
-        package_args, partition_sources, reject_unknown_extensions, resolve_path, resolve_sdk_root,
-        rgen_java_path, string_list, string_value,
+        merge_variant_sources, package_args, partition_sources, reject_unknown_extensions,
+        resolve_path, resolve_sdk_root, rgen_java_path, string_list, string_value,
     };
     use exports::ulite::ulb::ulb_plugin::{Guest, PluginManifest};
     use serde_json::Value;
@@ -158,21 +158,11 @@ mod bindings {
             let mut classpath = vec![platform_jar.to_string_lossy().into_owned()];
             classpath.extend(classpath_bucket(&config, "compile"));
 
-            // When Kotlin sources are present, resolve kotlin-stdlib from
-            // the compile classpath so D8 can dex it into the APK.  kotlinc
-            // bundles stdlib on its own classpath during compilation, but
-            // the resulting bytecode references stdlib types that must also
-            // be present in the dex output.
-            let mut d8_extra_jars: Vec<String> = Vec::new();
-            if !kotlin_sources.is_empty()
-                && let Some(stdlib) = classpath.iter().find(|j| {
-                    j.contains("kotlin-stdlib")
-                        && j.ends_with(".jar")
-                        && !j.ends_with("-sources.jar")
-                })
-            {
-                d8_extra_jars.push(stdlib.clone());
-            }
+            // Kotlin-stdlib handling moved into the variant loop below: a
+            // variant needs the stdlib jar dexed in exactly when THAT
+            // variant's merged sources contain Kotlin — which, with flavor
+            // source layering, can differ per variant even when the base
+            // `android.sources` is pure Java.
 
             // Derived build products live under <project>/build/android; the
             // variant-specific subdirectories are created inside the variant
@@ -205,8 +195,10 @@ mod bindings {
                 ],
             )?;
 
-            // Variant matrix.
-            let variants = compute_variants(&config)?;
+            // Variant matrix. The flavors map is returned alongside so the
+            // per-variant source merge below can resolve each selected
+            // flavor's `sources`.
+            let (variants, flavor_infos) = compute_variants(&config)?;
 
             // Signing (shared across all variants). Password files are
             // written once; each variant's signApk task reads the same files.
@@ -262,6 +254,18 @@ mod bindings {
 
             // Per-variant tasks.
             for variant in &variants {
+                // Source-set layering: the variant's effective sources are
+                // the module's base `android.sources` plus every selected
+                // flavor's `sources`.
+                let variant_all_sources = merge_variant_sources(
+                    &all_sources,
+                    project_dir,
+                    &variant.flavors,
+                    &flavor_infos,
+                )?;
+                let (variant_java_sources, variant_kotlin_sources) =
+                    partition_sources(&variant_all_sources);
+
                 let variant_build = build_dir.join(&variant.variant_dir);
                 let variant_classes_dir = variant_build.join("classes");
                 let variant_classes_jar = variant_build.join("classes.jar");
@@ -276,6 +280,22 @@ mod bindings {
                         variant_apk.display()
                     )
                 })?;
+
+                // When THIS variant's merged sources contain Kotlin, resolve
+                // kotlin-stdlib from the compile classpath so D8 dexes it
+                // into the APK. kotlinc bundles stdlib on its own classpath
+                // during compilation, but the resulting bytecode references
+                // stdlib types that must also be present in the dex output.
+                let mut d8_extra_jars: Vec<String> = Vec::new();
+                if !variant_kotlin_sources.is_empty()
+                    && let Some(stdlib) = classpath.iter().find(|j| {
+                        j.contains("kotlin-stdlib")
+                            && j.ends_with(".jar")
+                            && !j.ends_with("-sources.jar")
+                    })
+                {
+                    d8_extra_jars.push(stdlib.clone());
+                }
 
                 run_tool_task(
                     &format!("prepareApk{}", variant.name),
@@ -366,7 +386,7 @@ mod bindings {
                 // a multi-pass compilation (compile R.java → compile Kotlin
                 // → compile user Java).  Pure-Kotlin and pure-Java modules
                 // are unaffected.
-                let mut java_inputs = java_sources.clone();
+                let mut java_inputs = variant_java_sources.clone();
                 java_inputs.push(variant_rgen_java.to_string_lossy().into_owned());
                 run_tool_task(
                     &format!("compileJava{}", variant.name),
@@ -377,7 +397,7 @@ mod bindings {
                     compile_args(
                         &variant_classes_dir.to_string_lossy(),
                         &classpath,
-                        &java_sources,
+                        &variant_java_sources,
                         &variant_rgen_dir,
                         &variant_rgen_java,
                     ),
@@ -396,10 +416,10 @@ mod bindings {
                     None
                 };
                 let mut compile_tasks = vec![format!("compileJava{}", variant.name)];
-                if !kotlin_sources.is_empty() {
+                if !variant_kotlin_sources.is_empty() {
                     run_tool_task(
                         &format!("compileKotlin{}", variant.name),
-                        kotlin_sources.clone(),
+                        variant_kotlin_sources.clone(),
                         vec![variant_classes_dir.to_string_lossy().into_owned()],
                         vec![format!("compileJava{}", variant.name)],
                         AllowlistedTool::Kotlinc,
@@ -407,7 +427,7 @@ mod bindings {
                             &variant_classes_dir.to_string_lossy(),
                             &platform_jar.to_string_lossy(),
                             &classpath,
-                            &kotlin_sources,
+                            &variant_kotlin_sources,
                             compose_compiler_jar.as_deref(),
                         ),
                     )?;
@@ -547,6 +567,18 @@ mod bindings {
     export!(AndroidPlugin);
 }
 
+/// A flavor's parsed `productFlavors {}` entry: its dimension, effective
+/// SDK floor override, application-id suffix, and any flavor-specific
+/// source paths (raw; resolved against the project directory when a
+/// variant's sources are merged).
+struct FlavorInfo {
+    dimension: String,
+    min_sdk: Option<i64>,
+    application_id_suffix: String,
+    /// Raw (unresolved) source paths declared on the flavor.
+    sources: Vec<String>,
+}
+
 /// A single build variant derived from the cartesian product of build types
 /// and product flavors.
 #[derive(Debug)]
@@ -567,6 +599,9 @@ struct Variant {
     variant_dir: String,
     /// APK filename (e.g. `app-debug.apk`, `app-debugFree.apk`).
     apk_filename: String,
+    /// Names of the flavors selected into this variant, in product-flavors
+    /// map order. A build type without flavors selects none.
+    flavors: Vec<String>,
 }
 
 /// Computes the variant matrix from the module config's `buildTypes {}` and
@@ -583,7 +618,9 @@ struct Variant {
 /// Each variant's `minSdk` is the base `android.minSdk` overridden by the
 /// flavor's `minSdk` when present. The `applicationIdSuffix` comes from the
 /// flavor only.
-fn compute_variants(config: &serde_json::Value) -> Result<Vec<Variant>, String> {
+fn compute_variants(
+    config: &serde_json::Value,
+) -> Result<(Vec<Variant>, std::collections::BTreeMap<String, FlavorInfo>), String> {
     let android = config
         .get("android")
         .ok_or_else(|| "module config has no 'android' block".to_owned())?;
@@ -603,11 +640,6 @@ fn compute_variants(config: &serde_json::Value) -> Result<Vec<Variant>, String> 
     };
 
     // Product flavors: absent means no flavors (each build type is a variant).
-    struct FlavorInfo {
-        dimension: String,
-        min_sdk: Option<i64>,
-        application_id_suffix: String,
-    }
 
     let flavors: std::collections::BTreeMap<String, FlavorInfo> = match config.get("productFlavors")
     {
@@ -649,12 +681,29 @@ fn compute_variants(config: &serde_json::Value) -> Result<Vec<Variant>, String> 
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_owned();
+                let sources = match block_obj.get("sources") {
+                    Some(Value::Array(items)) => items
+                        .iter()
+                        .map(|item| {
+                            item.as_str().map(str::to_owned).ok_or_else(|| {
+                                format!("flavor '{name}' sources must be strings")
+                            })
+                        })
+                        .collect::<Result<Vec<String>, String>>()?,
+                    Some(_) => {
+                        return Err(format!(
+                            "flavor '{name}' sources must be a list of strings"
+                        ));
+                    }
+                    None => Vec::new(),
+                };
                 map.insert(
                     name.to_owned(),
                     FlavorInfo {
                         dimension,
                         min_sdk,
                         application_id_suffix,
+                        sources,
                     },
                 );
             }
@@ -685,6 +734,7 @@ fn compute_variants(config: &serde_json::Value) -> Result<Vec<Variant>, String> 
                 application_id_suffix: String::new(),
                 variant_dir,
                 apk_filename,
+                flavors: Vec::new(),
             });
         }
     } else {
@@ -706,12 +756,39 @@ fn compute_variants(config: &serde_json::Value) -> Result<Vec<Variant>, String> 
                     application_id_suffix: flavor_info.application_id_suffix.clone(),
                     variant_dir,
                     apk_filename,
+                    flavors: vec![flavor_name.clone()],
                 });
             }
         }
     }
 
-    Ok(variants)
+    Ok((variants, flavors))
+}
+
+/// Merges a variant's effective source list: the module's base sources plus
+/// every selected flavor's `sources` (raw paths resolved against the project
+/// directory), deduplicated with first occurrence winning. Supported
+/// extensions are re-validated on the merged list so a flavor cannot sneak
+/// in an unsupported file type.
+fn merge_variant_sources(
+    base: &[String],
+    project_dir: &str,
+    selected_flavors: &[String],
+    flavor_infos: &std::collections::BTreeMap<String, FlavorInfo>,
+) -> Result<Vec<String>, String> {
+    let mut merged = base.to_vec();
+    for name in selected_flavors {
+        if let Some(info) = flavor_infos.get(name) {
+            for raw in &info.sources {
+                let resolved = resolve_path(project_dir, raw);
+                if !merged.contains(&resolved) {
+                    merged.push(resolved);
+                }
+            }
+        }
+    }
+    reject_unknown_extensions(&merged)?;
+    Ok(merged)
 }
 
 /// Converts a lowercase identifier to PascalCase.
@@ -1372,6 +1449,58 @@ mod tests {
         assert_eq!(to_pascal_case("release"), "Release");
         assert_eq!(to_pascal_case("free"), "Free");
         assert_eq!(to_pascal_case("paid"), "Paid");
+
+        // Mixed-case tails are preserved; digit-leading parts survive.
+        assert_eq!(to_pascal_case("myFlavor"), "MyFlavor");
+        assert_eq!(to_pascal_case("3d"), "3d");
+    }
+
+    #[test]
+    fn compute_variants_carries_selected_flavor_names_and_sources() {
+        // Variants carry their selected flavor names so the per-variant
+        // source merge can find each flavor's `sources`.
+        let config = serde_json::json!({
+            "android": { "compileSdk": 36, "minSdk": 21 },
+            "buildTypes": {
+                "debug": {},
+                "release": {}
+            },
+            "productFlavors": {
+                "dimension": "tier",
+                "free": {
+                    "dimension": "tier",
+                    "sources": ["src/free/Free.kt"]
+                },
+                "paid": {
+                    "dimension": "tier"
+                }
+            }
+        });
+        let (variants, flavor_infos) = compute_variants(&config).expect("variants");
+        let free_debug = variants
+            .iter()
+            .find(|v| v.name == "DebugFree")
+            .expect("DebugFree variant");
+        assert_eq!(free_debug.flavors, ["free".to_owned()]);
+        assert_eq!(
+            flavor_infos
+                .get("free")
+                .expect("free flavor")
+                .sources,
+            ["src/free/Free.kt".to_owned()]
+        );
+        let paid_release = variants
+            .iter()
+            .find(|v| v.name == "ReleasePaid")
+            .expect("ReleasePaid variant");
+        assert_eq!(paid_release.flavors, ["paid".to_owned()]);
+
+        // A build type without flavors selects none.
+        let plain = serde_json::json!({
+            "android": { "compileSdk": 36, "minSdk": 21 }
+        });
+        let (variants, _) = compute_variants(&plain).expect("variants");
+        assert!(variants.iter().all(|v| v.flavors.is_empty()));
     }
 
     #[test]
@@ -1379,7 +1508,7 @@ mod tests {
         let config = json!({
             "android": { "compileSdk": 36, "minSdk": 21 }
         });
-        let variants = compute_variants(&config).expect("variants");
+        let (variants, _) = compute_variants(&config).expect("variants");
         assert_eq!(variants.len(), 2);
         assert_eq!(variants[0].name, "Debug");
         assert_eq!(variants[0].variant_dir, "debug");
@@ -1398,7 +1527,7 @@ mod tests {
                 "release": { "minifyEnabled": true }
             }
         });
-        let variants = compute_variants(&config).expect("variants");
+        let (variants, _) = compute_variants(&config).expect("variants");
         assert_eq!(variants.len(), 2);
         assert_eq!(variants[0].name, "Debug");
         assert_eq!(variants[1].name, "Release");
@@ -1418,7 +1547,7 @@ mod tests {
                 "paid": { "applicationIdSuffix": ".paid" }
             }
         });
-        let variants = compute_variants(&config).expect("variants");
+        let (variants, _) = compute_variants(&config).expect("variants");
         assert_eq!(variants.len(), 4);
         let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
         assert!(names.contains(&"DebugFree"));
@@ -1440,7 +1569,7 @@ mod tests {
                 "free": { "minSdk": 24 }
             }
         });
-        let variants = compute_variants(&config).expect("variants");
+        let (variants, _) = compute_variants(&config).expect("variants");
         assert_eq!(variants.len(), 2);
         let free = variants
             .iter()
@@ -1618,5 +1747,73 @@ mod tests {
         let v = serde_json::json!({ "compose": "yes" });
         let err = bool_value(&v, "compose").unwrap_err();
         assert!(err.contains("true or false"), "{err}");
+    }
+
+    #[test]
+    fn merge_variant_sources_deduplicates_first_occurrence_wins() {
+        let base = vec!["src/Main.java".to_owned()];
+        let infos = std::collections::BTreeMap::from([(
+            "free".to_owned(),
+            FlavorInfo {
+                dimension: "tier".to_owned(),
+                min_sdk: None,
+                application_id_suffix: ".free".to_owned(),
+                sources: vec!["src/free/Free.kt".to_owned()],
+            },
+        )]);
+        // The base already lists the flavor's file via its absolute-ish
+        // spelling; the raw flavor path resolves onto it and is dropped.
+        let merged = merge_variant_sources(
+            &["src/Main.java".to_owned(), "src/free/Free.kt".to_owned()],
+            "/proj",
+            &["free".to_owned()],
+            &infos,
+        )
+        .expect("merges");
+        assert_eq!(
+            merged,
+            [
+                "src/Main.java".to_owned(),
+                "src/free/Free.kt".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_variant_sources_resolves_relative_paths_against_project_dir() {
+        let infos = std::collections::BTreeMap::from([(
+            "paid".to_owned(),
+            FlavorInfo {
+                dimension: "tier".to_owned(),
+                min_sdk: None,
+                application_id_suffix: String::new(),
+                sources: vec!["src/paid/Paid.java".to_owned()],
+            },
+        )]);
+        let merged =
+            merge_variant_sources(&[], "/proj", &["paid".to_owned()], &infos).expect("merges");
+        assert_eq!(merged.len(), 1);
+        assert!(
+            merged[0].starts_with("/proj/"),
+            "relative flavor source must resolve against the project dir: {}",
+            merged[0]
+        );
+        assert!(merged[0].ends_with("src/paid/Paid.java"));
+    }
+
+    #[test]
+    fn merge_variant_sources_rejects_bad_extensions() {
+        let infos = std::collections::BTreeMap::from([(
+            "evil".to_owned(),
+            FlavorInfo {
+                dimension: "tier".to_owned(),
+                min_sdk: None,
+                application_id_suffix: String::new(),
+                sources: vec!["src/evil/payload.exe".to_owned()],
+            },
+        )]);
+        let err = merge_variant_sources(&[], "/proj", &["evil".to_owned()], &infos)
+            .expect_err("unsupported extension");
+        assert!(err.contains("neither a .java nor a .kt"), "{err}");
     }
 }

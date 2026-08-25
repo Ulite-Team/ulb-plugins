@@ -158,21 +158,11 @@ mod bindings {
             let mut classpath = vec![platform_jar.to_string_lossy().into_owned()];
             classpath.extend(classpath_bucket(&config, "compile"));
 
-            // When Kotlin sources are present, resolve kotlin-stdlib from
-            // the compile classpath so D8 can dex it into the APK.  kotlinc
-            // bundles stdlib on its own classpath during compilation, but
-            // the resulting bytecode references stdlib types that must also
-            // be present in the dex output.
-            let mut d8_extra_jars: Vec<String> = Vec::new();
-            if !kotlin_sources.is_empty()
-                && let Some(stdlib) = classpath.iter().find(|j| {
-                    j.contains("kotlin-stdlib")
-                        && j.ends_with(".jar")
-                        && !j.ends_with("-sources.jar")
-                })
-            {
-                d8_extra_jars.push(stdlib.clone());
-            }
+            // Kotlin-stdlib handling moved into the variant loop below: a
+            // variant needs the stdlib jar dexed in exactly when THAT
+            // variant's merged sources contain Kotlin — which, with flavor
+            // source layering, can differ per variant even when the base
+            // `android.sources` is pure Java.
 
             // Derived build products live under <project>/build/android; the
             // variant-specific subdirectories are created inside the variant
@@ -266,21 +256,13 @@ mod bindings {
             for variant in &variants {
                 // Source-set layering: the variant's effective sources are
                 // the module's base `android.sources` plus every selected
-                // flavor's `sources`, deduplicated with first occurrence
-                // winning. Extensions are re-validated on the merged list
-                // so a flavor cannot sneak in an unsupported file type.
-                let mut variant_all_sources = all_sources.clone();
-                for flavor_name in &variant.flavors {
-                    if let Some(info) = flavor_infos.get(flavor_name) {
-                        for raw in &info.sources {
-                            let resolved = resolve_path(project_dir, raw);
-                            if !variant_all_sources.contains(&resolved) {
-                                variant_all_sources.push(resolved);
-                            }
-                        }
-                    }
-                }
-                reject_unknown_extensions(&variant_all_sources)?;
+                // flavor's `sources`.
+                let variant_all_sources = merge_variant_sources(
+                    &all_sources,
+                    project_dir,
+                    &variant.flavors,
+                    &flavor_infos,
+                )?;
                 let (variant_java_sources, variant_kotlin_sources) =
                     partition_sources(&variant_all_sources);
 
@@ -298,6 +280,22 @@ mod bindings {
                         variant_apk.display()
                     )
                 })?;
+
+                // When THIS variant's merged sources contain Kotlin, resolve
+                // kotlin-stdlib from the compile classpath so D8 dexes it
+                // into the APK. kotlinc bundles stdlib on its own classpath
+                // during compilation, but the resulting bytecode references
+                // stdlib types that must also be present in the dex output.
+                let mut d8_extra_jars: Vec<String> = Vec::new();
+                if !variant_kotlin_sources.is_empty()
+                    && let Some(stdlib) = classpath.iter().find(|j| {
+                        j.contains("kotlin-stdlib")
+                            && j.ends_with(".jar")
+                            && !j.ends_with("-sources.jar")
+                    })
+                {
+                    d8_extra_jars.push(stdlib.clone());
+                }
 
                 run_tool_task(
                     &format!("prepareApk{}", variant.name),
@@ -569,9 +567,6 @@ mod bindings {
     export!(AndroidPlugin);
 }
 
-/// A single build variant derived from the cartesian product of build types
-/// and product flavors.
-#[derive(Debug)]
 /// A flavor's parsed `productFlavors {}` entry: its dimension, effective
 /// SDK floor override, application-id suffix, and any flavor-specific
 /// source paths (raw; resolved against the project directory when a
@@ -584,6 +579,9 @@ struct FlavorInfo {
     sources: Vec<String>,
 }
 
+/// A single build variant derived from the cartesian product of build types
+/// and product flavors.
+#[derive(Debug)]
 struct Variant {
     /// PascalCase variant name used as a task suffix (e.g. `Debug`,
     /// `Release`, `DebugFree`).
@@ -765,6 +763,32 @@ fn compute_variants(
     }
 
     Ok((variants, flavors))
+}
+
+/// Merges a variant's effective source list: the module's base sources plus
+/// every selected flavor's `sources` (raw paths resolved against the project
+/// directory), deduplicated with first occurrence winning. Supported
+/// extensions are re-validated on the merged list so a flavor cannot sneak
+/// in an unsupported file type.
+fn merge_variant_sources(
+    base: &[String],
+    project_dir: &str,
+    selected_flavors: &[String],
+    flavor_infos: &std::collections::BTreeMap<String, FlavorInfo>,
+) -> Result<Vec<String>, String> {
+    let mut merged = base.to_vec();
+    for name in selected_flavors {
+        if let Some(info) = flavor_infos.get(name) {
+            for raw in &info.sources {
+                let resolved = resolve_path(project_dir, raw);
+                if !merged.contains(&resolved) {
+                    merged.push(resolved);
+                }
+            }
+        }
+    }
+    reject_unknown_extensions(&merged)?;
+    Ok(merged)
 }
 
 /// Converts a lowercase identifier to PascalCase.
@@ -1426,6 +1450,13 @@ mod tests {
         assert_eq!(to_pascal_case("free"), "Free");
         assert_eq!(to_pascal_case("paid"), "Paid");
 
+        // Mixed-case tails are preserved; digit-leading parts survive.
+        assert_eq!(to_pascal_case("myFlavor"), "MyFlavor");
+        assert_eq!(to_pascal_case("3d"), "3d");
+    }
+
+    #[test]
+    fn compute_variants_carries_selected_flavor_names_and_sources() {
         // Variants carry their selected flavor names so the per-variant
         // source merge can find each flavor's `sources`.
         let config = serde_json::json!({
@@ -1716,5 +1747,73 @@ mod tests {
         let v = serde_json::json!({ "compose": "yes" });
         let err = bool_value(&v, "compose").unwrap_err();
         assert!(err.contains("true or false"), "{err}");
+    }
+
+    #[test]
+    fn merge_variant_sources_deduplicates_first_occurrence_wins() {
+        let base = vec!["src/Main.java".to_owned()];
+        let infos = std::collections::BTreeMap::from([(
+            "free".to_owned(),
+            FlavorInfo {
+                dimension: "tier".to_owned(),
+                min_sdk: None,
+                application_id_suffix: ".free".to_owned(),
+                sources: vec!["src/free/Free.kt".to_owned()],
+            },
+        )]);
+        // The base already lists the flavor's file via its absolute-ish
+        // spelling; the raw flavor path resolves onto it and is dropped.
+        let merged = merge_variant_sources(
+            &["src/Main.java".to_owned(), "src/free/Free.kt".to_owned()],
+            "/proj",
+            &["free".to_owned()],
+            &infos,
+        )
+        .expect("merges");
+        assert_eq!(
+            merged,
+            [
+                "src/Main.java".to_owned(),
+                "src/free/Free.kt".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_variant_sources_resolves_relative_paths_against_project_dir() {
+        let infos = std::collections::BTreeMap::from([(
+            "paid".to_owned(),
+            FlavorInfo {
+                dimension: "tier".to_owned(),
+                min_sdk: None,
+                application_id_suffix: String::new(),
+                sources: vec!["src/paid/Paid.java".to_owned()],
+            },
+        )]);
+        let merged =
+            merge_variant_sources(&[], "/proj", &["paid".to_owned()], &infos).expect("merges");
+        assert_eq!(merged.len(), 1);
+        assert!(
+            merged[0].starts_with("/proj/"),
+            "relative flavor source must resolve against the project dir: {}",
+            merged[0]
+        );
+        assert!(merged[0].ends_with("src/paid/Paid.java"));
+    }
+
+    #[test]
+    fn merge_variant_sources_rejects_bad_extensions() {
+        let infos = std::collections::BTreeMap::from([(
+            "evil".to_owned(),
+            FlavorInfo {
+                dimension: "tier".to_owned(),
+                min_sdk: None,
+                application_id_suffix: String::new(),
+                sources: vec!["src/evil/payload.exe".to_owned()],
+            },
+        )]);
+        let err = merge_variant_sources(&[], "/proj", &["evil".to_owned()], &infos)
+            .expect_err("unsupported extension");
+        assert!(err.contains("neither a .java nor a .kt"), "{err}");
     }
 }

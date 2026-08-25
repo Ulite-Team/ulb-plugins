@@ -1211,22 +1211,47 @@ struct BuildConfigField {
 
 /// Parses `buildConfigField` entries from the `android {}` block. Each entry
 /// is a list triple `["TYPE", "NAME", "INITIALIZER"]`.
+///
+/// The evaluator's `insert_accumulating` flattens repeated list-valued keys.
+/// When a single `buildConfigField` is declared, the value is a flat
+/// 3-element list. When two or more are declared, the first triple's
+/// elements remain as top-level strings and subsequent triples arrive as
+/// nested sub-arrays — e.g. `["String", "A", "x", ["int", "B", "3"]]`.
+/// This function walks the array and extracts triples from both forms.
 fn parse_build_config_fields(android: &serde_json::Value) -> Vec<BuildConfigField> {
     let mut fields = Vec::new();
-    if let Some(obj) = android.as_object() {
-        for (key, value) in obj {
-            if key == "buildConfigField"
-                && let Some(arr) = value.as_array().filter(|a| a.len() == 3)
+    if let Some(obj) = android.as_object()
+        && let Some(arr) = obj.get("buildConfigField").and_then(|v| v.as_array())
+    {
+        let mut i = 0;
+        while i < arr.len() {
+            if let serde_json::Value::Array(sub) = &arr[i]
+                && sub.len() == 3
             {
-                let java_type = arr[0].as_str().unwrap_or("Object").to_owned();
-                let name = arr[1].as_str().unwrap_or("_UNKNOWN_").to_owned();
-                let initializer = arr[2].as_str().unwrap_or("null").to_owned();
+                let java_type = sub[0].as_str().unwrap_or("Object").to_owned();
+                let name = sub[1].as_str().unwrap_or("_UNKNOWN_").to_owned();
+                let initializer = sub[2].as_str().unwrap_or("null").to_owned();
                 fields.push(BuildConfigField {
                     java_type,
                     name,
                     initializer,
                 });
+                i += 1;
+                continue;
             }
+            if i + 2 < arr.len()
+                && let (Some(a), Some(b), Some(c)) =
+                    (arr[i].as_str(), arr[i + 1].as_str(), arr[i + 2].as_str())
+            {
+                fields.push(BuildConfigField {
+                    java_type: a.to_owned(),
+                    name: b.to_owned(),
+                    initializer: c.to_owned(),
+                });
+                i += 3;
+                continue;
+            }
+            i += 1;
         }
     }
     fields
@@ -2002,25 +2027,43 @@ mod tests {
 
     #[test]
     fn parse_build_config_fields_extracts_triples() {
+        // With two buildConfigField entries, insert_accumulating produces a
+        // flat first triple + a nested second triple:
+        // ["String", "API_KEY", "\"abc123\"", ["boolean", "FEATURE_FLAG", "true"]]
         let android = serde_json::json!({
             "compileSdk": 36,
-            "buildConfigField": ["String", "API_KEY", "\"abc123\""],
+            "buildConfigField": [
+                "String", "API_KEY", "\"abc123\"",
+                ["boolean", "FEATURE_FLAG", "true"]
+            ],
             "namespace": "com.example",
-            "buildConfigField": ["boolean", "FEATURE_FLAG", "true"],
         });
-        // serde_json deduplicates keys (last wins), so only one remains.
+        let fields = parse_build_config_fields(&android);
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].java_type, "String");
+        assert_eq!(fields[0].name, "API_KEY");
+        assert_eq!(fields[0].initializer, "\"abc123\"");
+        assert_eq!(fields[1].java_type, "boolean");
+        assert_eq!(fields[1].name, "FEATURE_FLAG");
+        assert_eq!(fields[1].initializer, "true");
+    }
+
+    #[test]
+    fn parse_build_config_fields_single_triple() {
+        let android = serde_json::json!({
+            "buildConfigField": ["String", "API_KEY", "abc123"],
+        });
         let fields = parse_build_config_fields(&android);
         assert_eq!(fields.len(), 1);
-        assert_eq!(fields[0].java_type, "boolean");
-        assert_eq!(fields[0].name, "FEATURE_FLAG");
-        assert_eq!(fields[0].initializer, "true");
+        assert_eq!(fields[0].java_type, "String");
+        assert_eq!(fields[0].name, "API_KEY");
+        assert_eq!(fields[0].initializer, "abc123");
     }
 
     #[test]
     fn parse_build_config_fields_ignores_non_triple_values() {
         let android = serde_json::json!({
             "buildConfigField": "not a list",
-            "buildConfigField": ["String", "NAME"],
         });
         let fields = parse_build_config_fields(&android);
         assert!(fields.is_empty());

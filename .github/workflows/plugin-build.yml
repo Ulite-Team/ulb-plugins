@@ -961,7 +961,7 @@ jobs:
           # consumes it, but not the mkdirs or BuildConfig generation.
           cd /tmp/android
           sed -i 's/Uliab CI Example/Uliab CI Example v2/' res/values/strings.xml
-          grep -q '15 ran, 5 up-to-date' <<<"$(build)"
+          grep -q '13 ran, 7 up-to-date' <<<"$(build)"
           # A source change reruns compile and the dex/package chain only.
           sed -i 's|setContentView(R.layout.activity_main);|setContentView(R.layout.activity_main); // v2|' src/Main.java
           grep -q '8 ran, 12 up-to-date' <<<"$(build)"

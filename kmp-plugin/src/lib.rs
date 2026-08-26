@@ -19,6 +19,54 @@
 //! Consumed keys are documented in `docs/kmp-plugin.md`
 //! (Uliab/docs/architecture.md §5.3).
 
+use ulb_plugin_sdk::UlbConfig;
+
+/// The `ulite/kmp` plugin configuration. The `kmp` block itself is a
+/// dynamic map (source sets and targets); only the host-injected keys
+/// and the known sub-blocks have fixed schemas.
+#[derive(UlbConfig, serde::Deserialize)]
+pub struct KmpPluginConfig {
+    /// The project directory the build was started for. All relative paths
+    /// in source sets and target blocks resolve against this.
+    #[ulb(rename = "projectDir")]
+    pub project_dir: String,
+
+    /// The `kmp` block: a dynamic map of named source sets (blocks with a
+    /// `sources` key) and target configs (`jvm`, `android`, etc.). The
+    /// internal structure is validated at configure time, not by schema.
+    pub kmp: serde_json::Value,
+
+    /// Per-source-set resolved classpath buckets, injected by the host.
+    /// Keyed by source-set path under the model (e.g. `"kmp.commonMain"`).
+    #[ulb(rename = "classpathSourceSets")]
+    pub classpath_source_sets: Option<serde_json::Value>,
+
+    /// The Android configuration block. Required when the `kmp` block
+    /// declares an `android` target. Shares the same top-level shape the
+    /// `ulite/android` plugin consumes.
+    pub android: Option<serde_json::Value>,
+
+    /// The resolved Android SDK root, injected by the host from its
+    /// `--android-sdk` flag or the `ANDROID_HOME` / `ANDROID_SDK_ROOT`
+    /// environment conventions.
+    #[ulb(rename = "androidSdkDir")]
+    pub android_sdk_dir: Option<String>,
+
+    /// Named build-type blocks (e.g. `debug`, `release`, or custom).
+    /// Each may carry a `minSdk` override. Defaults to `["debug",
+    /// "release"]` when absent.
+    pub build_types: Option<serde_json::Value>,
+
+    /// Product-flavor blocks and an optional top-level `dimension` key.
+    /// Each flavor may carry `dimension`, `minSdk`, and `sources`.
+    pub product_flavors: Option<serde_json::Value>,
+
+    /// APK signing configuration. When present, `storeFile` and
+    /// `keyAlias` are required. Passwords are delegated to the
+    /// `ulite/android` plugin's signing tasks.
+    pub signing: Option<serde_json::Value>,
+}
+
 mod bindings {
     #![allow(unsafe_code)]
     #![allow(clippy::missing_safety_doc)]
@@ -29,14 +77,17 @@ mod bindings {
     });
 
     use crate::{
-        TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args, compute_variants,
-        find_compose_compiler_jar, jar_args, kotlinc_android_args, merged_classpath,
-        merged_classpath_bucket, optional_string_list, partition_sources,
+        KmpPluginConfig, TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args,
+        compute_variants, find_compose_compiler_jar, jar_args, kotlinc_android_args,
+        merged_classpath, merged_classpath_bucket, optional_string_list, partition_sources,
         reject_unknown_extensions, resolve_path, resolve_paths, run_test_args,
     };
     use exports::ulite::ulb::ulb_plugin::{Guest, PluginManifest};
     use serde_json::Value;
+    use ulb_plugin_sdk::embed_schema;
     use ulite::ulb::task_registrar::{self, Action, AllowlistedTool, RunToolArgs, Task};
+
+    embed_schema!(KmpPluginConfig);
 
     const JVM_SOURCE_SETS: &[&str] = &["commonMain", "jvmMain"];
     const JVM_TEST_SOURCE_SETS: &[&str] = &["commonTest", "jvmTest"];

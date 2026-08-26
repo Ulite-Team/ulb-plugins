@@ -66,6 +66,157 @@
 //! §5.2).
 
 use serde_json::Value;
+use ulb_plugin_sdk::UlbConfig;
+
+/// Top-level module configuration for the `ulite/android` plugin.
+///
+/// The host serializes a module's `android {}` block (plus host-injected
+/// keys like `projectDir` and `androidSdkDir`) into this shape and passes
+/// it to `configure` as a JSON string.
+#[derive(UlbConfig, serde::Deserialize)]
+pub struct AndroidPluginConfig {
+    /// Host-injected project root directory; all relative block paths
+    /// resolve against this.
+    #[ulb(rename = "projectDir")]
+    pub project_dir: String,
+
+    /// The module's `android {}` block describing sources, SDK levels,
+    /// namespace, and resource directories.
+    pub android: AndroidBlock,
+
+    /// Host-injected Android SDK root (from `--android-sdk`, `ANDROID_HOME`,
+    /// or `ANDROID_SDK_ROOT`); overridden by `android.sdkDir` when present.
+    #[serde(default)]
+    #[ulb(rename = "androidSdkDir")]
+    pub android_sdk_dir: Option<String>,
+
+    /// The module's `signing {}` block; when absent, produced APKs are
+    /// unsigned.
+    #[serde(default)]
+    pub signing: Option<SigningBlock>,
+
+    /// Map of build-type name to its block. Keys define the build-type
+    /// dimension of the variant matrix. When absent, defaults to
+    /// `{ "debug": {}, "release": {} }`.
+    #[serde(default)]
+    #[ulb(rename = "buildTypes")]
+    #[ulb(
+        description = "Build-type map; keys become variant dimensions (default: debug + release)"
+    )]
+    pub build_types: Option<serde_json::Value>,
+
+    /// Map of flavor name to its block, plus optional top-level `dimension`
+    /// key. When absent, no flavor dimension exists.
+    #[serde(default)]
+    #[ulb(rename = "productFlavors")]
+    pub product_flavors: Option<serde_json::Value>,
+
+    /// Host-resolved dependency jars keyed by bucket name (`"compile"`,
+    /// `"testCompile"`, etc.).
+    #[serde(default)]
+    pub classpath: Option<ClasspathBlock>,
+}
+
+/// Fields declared inside the `android {}` DSL block.
+#[derive(UlbConfig, serde::Deserialize)]
+pub struct AndroidBlock {
+    /// Android API level to compile against (e.g. `36`). Determines which
+    /// `platforms/android-<N>/android.jar` the toolchain uses.
+    #[ulb(rename = "compileSdk")]
+    pub compile_sdk: i64,
+
+    /// Java package namespace (e.g. `"com.example.app"`). Drives R.java
+    /// generation and the `BuildConfig` package.
+    pub namespace: String,
+
+    /// Whether Jetpack Compose is enabled. When true, the compose compiler
+    /// plugin JAR must be present on the compile classpath.
+    #[serde(default)]
+    pub compose: Option<bool>,
+
+    /// Source file paths (`.java` and `.kt`) relative to the project
+    /// directory. Must be non-empty.
+    pub sources: Vec<String>,
+
+    /// Path to `AndroidManifest.xml`, relative to the project directory.
+    pub manifest: String,
+
+    /// Path to the Android resources directory for `aapt2 compile --dir`,
+    /// relative to the project directory.
+    #[ulb(rename = "resDir")]
+    pub res_dir: String,
+
+    /// Per-module Android SDK root override (resolved against `projectDir`).
+    /// Takes precedence over the host-injected `androidSdkDir`.
+    #[serde(default)]
+    #[ulb(rename = "sdkDir")]
+    pub sdk_dir: Option<String>,
+
+    /// Minimum Android API level. Passed to `d8 --min-api` and
+    /// `aapt2 link --min-sdk-version`. Product flavors may override this.
+    #[ulb(rename = "minSdk")]
+    pub min_sdk: i64,
+
+    /// Target Android API level. Passed to `aapt2 link --target-sdk-version`.
+    /// Defaults to `compileSdk` when absent.
+    #[serde(default)]
+    #[ulb(rename = "targetSdk")]
+    pub target_sdk: Option<i64>,
+
+    /// Version code written into the generated `BuildConfig.VERSION_CODE`.
+    /// Defaults to `1`.
+    #[serde(default)]
+    #[ulb(rename = "versionCode")]
+    pub version_code: Option<i64>,
+
+    /// Version name written into the generated `BuildConfig.VERSION_NAME`.
+    /// Defaults to the empty string.
+    #[serde(default)]
+    #[ulb(rename = "versionName")]
+    pub version_name: Option<String>,
+
+    /// User-defined BuildConfig fields. Each entry is a
+    /// `["TYPE", "NAME", "INITIALIZER"]` triple. The evaluator's
+    /// `insert_accumulating` may flatten the first triple and nest
+    /// subsequent ones as sub-arrays.
+    #[serde(default)]
+    #[ulb(rename = "buildConfigField")]
+    #[ulb(
+        description = "List of [\"TYPE\", \"NAME\", \"INITIALIZER\"] triples for custom BuildConfig fields"
+    )]
+    pub build_config_field: Option<Vec<serde_json::Value>>,
+}
+
+/// APK signing configuration. All four fields are required when the block
+/// is present. Produces two password files shared across all variants.
+#[derive(UlbConfig, serde::Deserialize)]
+pub struct SigningBlock {
+    /// Path to the keystore file (resolved against the project directory).
+    #[ulb(rename = "storeFile")]
+    pub store_file: String,
+
+    /// Keystore password, written to a temporary file and passed to
+    /// `apksigner` via `--ks-pass file:`.
+    #[ulb(rename = "storePassword")]
+    pub store_password: String,
+
+    /// Key alias within the keystore.
+    #[ulb(rename = "keyAlias")]
+    pub key_alias: String,
+
+    /// Key password, written to a temporary file and passed to `apksigner`
+    /// via `--key-pass file:`.
+    #[ulb(rename = "keyPassword")]
+    pub key_password: String,
+}
+
+/// Host-resolved dependency jars keyed by bucket name.
+#[derive(UlbConfig, serde::Deserialize)]
+pub struct ClasspathBlock {
+    /// Compile-time dependency jar paths; prepended after the platform jar.
+    #[serde(default)]
+    pub compile: Option<Vec<String>>,
+}
 
 mod bindings {
     #![allow(unsafe_code)]
@@ -78,6 +229,7 @@ mod bindings {
         world: "plugin",
     });
 
+    use crate::AndroidPluginConfig;
     use crate::{
         BuildConfigParams, android_jar, bool_value, classpath_bucket, compile_args,
         compute_variants, d8_args, find_compose_compiler_jar, generate_buildconfig_source,
@@ -87,7 +239,10 @@ mod bindings {
     };
     use exports::ulite::ulb::ulb_plugin::{Guest, PluginManifest};
     use serde_json::Value;
+    use ulb_plugin_sdk::embed_schema;
     use ulite::ulb::task_registrar::{self, Action, AllowlistedTool, RunToolArgs, Task};
+
+    embed_schema!(AndroidPluginConfig);
 
     /// Implements the exported `ulb-plugin` interface.
     struct AndroidPlugin;

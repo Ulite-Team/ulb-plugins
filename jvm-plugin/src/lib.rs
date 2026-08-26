@@ -25,6 +25,110 @@
 //! until one of its inputs or dependencies changes. Consumed keys are
 //! documented in `docs/jvm-plugin.md` (Uliab/docs/architecture.md §5.1).
 
+use ulb_plugin_sdk::UlbConfig;
+
+/// The `ulite/jvm` plugin's typed configuration, deserialized from
+/// the module model the host serializes as JSON for `configure()`.
+///
+/// Two nested objects (`classpath` and `jvm`) carry the host-resolved
+/// dependency classpaths and the module's own JVM build block,
+/// respectively. All relative paths in the `jvm` block are resolved
+/// against `project_dir` before use.
+#[derive(UlbConfig, serde::Deserialize)]
+pub struct PluginConfig {
+    /// The project directory the build was started for. All relative
+    /// paths in the `jvm {}` block are resolved against this directory.
+    #[ulb(rename = "projectDir")]
+    pub project_dir: String,
+
+    /// Host-resolved dependency classpaths, keyed by scope name.
+    /// Each bucket holds the jar paths the Maven resolver produced for
+    /// the corresponding `deps {}` declarations.
+    pub classpath: Classpath,
+
+    /// The module's JVM build configuration: source files, output
+    /// directories, and optional test settings.
+    pub jvm: JvmConfig,
+}
+
+/// Dependency classpath buckets the host resolves from the module's
+/// `deps {}` block. Each field corresponds to a dependency scope;
+/// the plugin selects which buckets to pass to which tools.
+#[derive(UlbConfig, serde::Deserialize)]
+pub struct Classpath {
+    /// Jar paths resolved from `api` and `implementation` declarations.
+    /// Passed to `javac`/`kotlinc` as `-cp`.
+    #[serde(default)]
+    pub compile: Vec<String>,
+
+    /// Jar paths resolved from `ksp` declarations, headed by the KSP2
+    /// toolchain jar. Non-empty only when the module declares KSP deps.
+    #[serde(default)]
+    pub processor: Vec<String>,
+
+    /// Jar paths for compiling test sources: test-scoped
+    /// `api`/`implementation` declarations plus test-only dependencies.
+    #[serde(rename = "testCompile", default)]
+    pub test_compile: Vec<String>,
+
+    /// Jar paths for running tests: test-scoped `implementation` plus
+    /// `runtimeOnly` declarations.
+    #[serde(rename = "testRuntime", default)]
+    pub test_runtime: Vec<String>,
+}
+
+/// The module's JVM build configuration block (`jvm {}` in the DSL).
+/// Declares sources, output directories, and optional test settings.
+#[derive(UlbConfig, serde::Deserialize)]
+pub struct JvmConfig {
+    /// `.java` and/or `.kt` source files to compile. At least one entry
+    /// is required; entries with extensions other than `.java` or `.kt`
+    /// are rejected at configure time.
+    pub sources: Vec<String>,
+
+    /// Directory the compilers write `.class` files into. Relative
+    /// paths are resolved against the project directory.
+    #[ulb(rename = "classesDir")]
+    pub classes_dir: String,
+
+    /// Output jar path the `assemble` task produces. Relative paths
+    /// are resolved against the project directory.
+    #[ulb(rename = "jarFile")]
+    pub jar_file: String,
+
+    /// `.java` test source files to compile. Kotlin test compilation is
+    /// not supported. Must appear together with `test_classes_dir` and
+    /// exactly one of `test_class` or `test_runner`.
+    #[serde(rename = "testSources")]
+    pub test_sources: Option<Vec<String>>,
+
+    /// Directory `javac` writes test `.class` files into. Must appear
+    /// together with `test_sources`. Relative paths are resolved
+    /// against the project directory.
+    #[serde(rename = "testClassesDir")]
+    pub test_classes_dir: Option<String>,
+
+    /// Fully qualified class with a `main` method that the `test` task
+    /// runs (e.g. `com.example.AppTest` or
+    /// `org.junit.runner.JUnitCore`). Mutually exclusive with
+    /// `test_runner`.
+    #[serde(rename = "testClass")]
+    pub test_class: Option<String>,
+
+    /// Extra arguments passed to the test runner after the class name.
+    /// Used to name classes for framework runners such as JUnitCore or
+    /// the JUnit Platform console launcher.
+    #[serde(rename = "testArgs", default)]
+    pub test_args: Vec<String>,
+
+    /// Test runner mode. Currently the only accepted value is
+    /// `"junit-platform"`, which generates a JUnit Platform
+    /// Launcher-API runner that discovers tests by scanning the test
+    /// classes directory. Mutually exclusive with `test_class`.
+    #[serde(rename = "testRunner")]
+    pub test_runner: Option<String>,
+}
+
 mod bindings {
     #![allow(unsafe_code)]
     #![allow(clippy::missing_safety_doc)]
@@ -37,15 +141,17 @@ mod bindings {
     });
 
     use crate::{
-        TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args, jar_args, ksp_args,
-        ksp_output_dirs, partition_sources, reject_unknown_extensions, resolve_path, run_test_args,
-        string_list,
+        JvmConfig, PluginConfig, TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args,
+        jar_args, ksp_args, ksp_output_dirs, partition_sources, reject_unknown_extensions,
+        resolve_path, run_test_args,
     };
     use exports::ulite::ulb::ulb_plugin::{Guest, PluginManifest};
-    use serde_json::Value;
+    use ulb_plugin_sdk::embed_schema;
     use ulite::ulb::task_registrar::{
         self, Action, AllowlistedTool, RunToolArgs, Task, WriteFileArgs,
     };
+
+    embed_schema!(PluginConfig);
 
     /// Implements the exported `ulb-plugin` interface.
     struct JvmPlugin;
@@ -70,52 +176,25 @@ mod bindings {
         }
 
         fn configure(module_config: String) -> Result<(), String> {
-            let config: Value = serde_json::from_str(&module_config)
+            let config: PluginConfig = serde_json::from_str(&module_config)
                 .map_err(|error| format!("invalid module config JSON: {error}"))?;
-            let project_dir = config
-                .get("projectDir")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "module config is missing 'projectDir'".to_owned())?;
-            let jvm = config
-                .get("jvm")
-                .ok_or_else(|| "module config has no 'jvm' block".to_owned())?;
 
-            let sources = string_list(jvm, "sources")?;
-            if sources.is_empty() {
-                return Err("the 'jvm' block declares no sources".to_owned());
-            }
-            let sources = resolve_paths(project_dir, &sources);
+            let sources = resolve_paths(&config.project_dir, &config.jvm.sources);
             reject_unknown_extensions(&sources)?;
             let (java_sources, kotlin_sources) = partition_sources(&sources);
 
-            let classes_dir = resolve_path(
-                project_dir,
-                jvm.get("classesDir")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "the 'jvm' block is missing a 'classesDir' string".to_owned())?,
-            );
-            let jar_file = resolve_path(
-                project_dir,
-                jvm.get("jarFile")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "the 'jvm' block is missing a 'jarFile' string".to_owned())?,
-            );
+            let classes_dir = resolve_path(&config.project_dir, &config.jvm.classes_dir);
+            let jar_file = resolve_path(&config.project_dir, &config.jvm.jar_file);
 
-            // The host already resolved the module's `deps {}` block into
-            // jar paths; the plugin only decides how they reach the tools.
-            let compile_classpath = classpath_bucket(&config, "compile");
-            let processor_classpath = classpath_bucket(&config, "processor");
+            let compile_classpath = &config.classpath.compile;
+            let processor_classpath = &config.classpath.processor;
 
-            // KSP processes the module's kotlin sources before either
-            // compiler runs. Its runner and the processors come from the
-            // `processor` bucket, which holds the `ksp` declarations, so a
-            // module with ksp deps must also have kotlin sources.
             let mut ksp_generated = None;
             if !processor_classpath.is_empty() {
                 if kotlin_sources.is_empty() {
                     return Err("the module declares ksp deps but has no .kt sources".to_owned());
                 }
-                let (kotlin_out, java_out) = ksp_output_dirs(project_dir);
+                let (kotlin_out, java_out) = ksp_output_dirs(&config.project_dir);
                 task_registrar::register_task(&Task {
                     name: "ksp".to_owned(),
                     inputs: kotlin_sources.clone(),
@@ -124,10 +203,10 @@ mod bindings {
                     action: Action::RunTool(RunToolArgs {
                         tool: AllowlistedTool::Java,
                         args: ksp_args(
-                            project_dir,
+                            &config.project_dir,
                             &kotlin_sources,
-                            &compile_classpath,
-                            &processor_classpath,
+                            compile_classpath,
+                            processor_classpath,
                         ),
                         cwd: ".".to_owned(),
                     }),
@@ -135,15 +214,6 @@ mod bindings {
                 ksp_generated = Some((kotlin_out, java_out));
             }
 
-            // Main compilation: one javac task for the module's own java
-            // sources, one kotlinc task for the kotlin sources. Kotlin can
-            // see the java classes, so the kotlin task waits for the java
-            // one when both source sets exist; when ksp ran, its generated
-            // kotlin directory joins the kotlinc task's source list (the
-            // generated java directory stays a ksp output: kotlinc emits no
-            // classes for `.java` sources, and javac requires an explicit
-            // file list that a task's static inputs cannot enumerate after
-            // ksp runs). Both compilers wait for ksp to finish generating.
             let mut compile_tasks = Vec::new();
             if !java_sources.is_empty() {
                 let mut depends_on = Vec::new();
@@ -157,7 +227,7 @@ mod bindings {
                     depends_on,
                     action: Action::RunTool(RunToolArgs {
                         tool: AllowlistedTool::Javac,
-                        args: compile_args(&classes_dir, &compile_classpath, &java_sources),
+                        args: compile_args(&classes_dir, compile_classpath, &java_sources),
                         cwd: ".".to_owned(),
                     }),
                 })?;
@@ -173,9 +243,6 @@ mod bindings {
                     kotlinc_sources.push(kotlin_out.clone());
                     depends_on.push("ksp".to_owned());
                 }
-                // The kotlin compiler resolves the module's own java classes
-                // the same way it would resolve a dependency jar, so the
-                // classes dir joins the compile classpath.
                 let mut kotlin_classpath = compile_classpath.clone();
                 kotlin_classpath.push(classes_dir.clone());
                 task_registrar::register_task(&Task {
@@ -204,7 +271,13 @@ mod bindings {
                 }),
             })?;
 
-            register_tests(jvm, project_dir, &config, &classes_dir, &compile_tasks)?;
+            register_tests(
+                &config.jvm,
+                &config.project_dir,
+                &config.classpath,
+                &classes_dir,
+                &compile_tasks,
+            )?;
 
             Ok(())
         }
@@ -227,37 +300,34 @@ mod bindings {
     /// tasks as a dependency so a changed main class forces the tests to
     /// recompile, and the run task depends on that compilation.
     fn register_tests(
-        jvm: &Value,
+        jvm: &JvmConfig,
         project_dir: &str,
-        config: &Value,
+        classpath: &crate::Classpath,
         classes_dir: &str,
         compile_tasks: &[String],
     ) -> Result<(), String> {
-        let test_sources = jvm.get("testSources");
-        let test_classes_dir = jvm.get("testClassesDir").and_then(Value::as_str);
-        if test_sources.is_none() != test_classes_dir.is_none() {
+        if jvm.test_sources.is_none() != jvm.test_classes_dir.is_none() {
             return Err(
                 "the 'jvm' block must set testSources and testClassesDir together".to_owned(),
             );
         }
-        let Some(test_classes_dir) = test_classes_dir else {
+        let Some(ref test_classes_dir) = jvm.test_classes_dir else {
             return Ok(());
         };
 
-        let test_class = jvm.get("testClass").and_then(Value::as_str);
-        let test_runner = jvm.get("testRunner").and_then(Value::as_str);
-        if test_class.is_some() && test_runner.is_some() {
+        if jvm.test_class.is_some() && jvm.test_runner.is_some() {
             return Err(
                 "the 'jvm' block sets both testClass and testRunner; choose one".to_owned(),
             );
         }
-        if test_class.is_none() && test_runner.is_none() {
+        if jvm.test_class.is_none() && jvm.test_runner.is_none() {
             return Err(
                 "the 'jvm' block sets testSources without a testClass or testRunner".to_owned(),
             );
         }
 
-        let test_sources = resolve_paths(project_dir, &string_list(jvm, "testSources")?);
+        let test_sources =
+            resolve_paths(project_dir, jvm.test_sources.as_deref().unwrap_or_default());
         if test_sources.is_empty() {
             return Err("the 'jvm' block declares no test sources".to_owned());
         }
@@ -272,18 +342,16 @@ mod bindings {
         }
 
         let test_classes_dir = resolve_path(project_dir, test_classes_dir);
-        // The test compiler sees the app classes and the test-compile
-        // classpath; the test run sees those plus the runtime classpath.
-        let mut test_compile_classpath = classpath_bucket(config, "testCompile");
+        let mut test_compile_classpath = classpath.test_compile.clone();
         test_compile_classpath.push(classes_dir.to_owned());
-        let mut test_runtime_classpath = classpath_bucket(config, "testRuntime");
+        let mut test_runtime_classpath = classpath.test_runtime.clone();
         test_runtime_classpath.push(test_classes_dir.clone());
         test_runtime_classpath.push(classes_dir.to_owned());
 
         let mut compile_sources = test_sources.clone();
         let mut compile_tests_depends = compile_tasks.to_vec();
         let test_run_args;
-        if let Some(test_runner) = test_runner {
+        if let Some(ref test_runner) = jvm.test_runner {
             if test_runner != "junit-platform" {
                 return Err(format!(
                     "unsupported testRunner '{test_runner}'; the supported value is \
@@ -309,12 +377,8 @@ mod bindings {
                 std::slice::from_ref(&test_classes_dir),
             );
         } else {
-            let test_class = test_class.expect("validated above");
-            // Extra arguments passed to the runner after the class name, so
-            // a framework main (JUnitCore, the JUnit Platform console
-            // launcher) can receive the classes it should execute.
-            let test_args = optional_string_list(jvm, "testArgs")?;
-            test_run_args = run_test_args(&test_runtime_classpath, test_class, &test_args);
+            let test_class = jvm.test_class.as_deref().expect("validated above");
+            test_run_args = run_test_args(&test_runtime_classpath, test_class, &jvm.test_args);
         }
 
         task_registrar::register_task(&Task {
@@ -349,42 +413,6 @@ mod bindings {
             .iter()
             .map(|path| resolve_path(project_dir, path))
             .collect()
-    }
-
-    /// Reads an optional string-list key of the module block; a missing key
-    /// is an empty list, a present non-list or non-string entry is an error.
-    fn optional_string_list(jvm: &Value, key: &str) -> Result<Vec<String>, String> {
-        let Some(value) = jvm.get(key) else {
-            return Ok(Vec::new());
-        };
-        let entries = value
-            .as_array()
-            .ok_or_else(|| format!("the 'jvm' block's '{key}' is not a list"))?;
-        entries
-            .iter()
-            .map(|entry| {
-                entry
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| format!("a 'jvm.{key}' entry is not a string"))
-            })
-            .collect()
-    }
-
-    /// The host-resolved jar list of one classpath bucket from the module
-    /// configuration (`compile`, `testCompile`, `testRuntime`, ...).
-    fn classpath_bucket(config: &Value, bucket: &str) -> Vec<String> {
-        config
-            .get("classpath")
-            .and_then(|classpath| classpath.get(bucket))
-            .and_then(Value::as_array)
-            .map(|jars| {
-                jars.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect::<Vec<String>>()
-            })
-            .unwrap_or_default()
     }
 
     // The export generates wasm component symbols (`export_name` with a
@@ -447,24 +475,6 @@ public final class TestRunner {
     }
 }
 "#;
-
-/// Reads a string-list key of the module block, erroring when the key is
-/// absent or holds a non-string entry.
-fn string_list(jvm: &serde_json::Value, key: &str) -> Result<Vec<String>, String> {
-    let entries = jvm
-        .get(key)
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| format!("the 'jvm' block is missing a '{key}' list"))?;
-    entries
-        .iter()
-        .map(|entry| {
-            entry
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| format!("a '{key}' entry is not a string"))
-        })
-        .collect()
-}
 
 /// Rejects a source file the compilers would not understand, so a typo in
 /// the block surfaces as a configure error instead of a javac/kotlinc run.
@@ -596,7 +606,6 @@ mod tests {
     use super::{
         TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args, jar_args, ksp_args,
         ksp_output_dirs, partition_sources, reject_unknown_extensions, resolve_path, run_test_args,
-        string_list,
     };
 
     #[test]
@@ -777,16 +786,6 @@ mod tests {
     fn unknown_source_extensions_are_rejected() {
         assert!(reject_unknown_extensions(&["/proj/src/App.txt".to_owned()]).is_err());
         assert!(reject_unknown_extensions(&["/proj/src/App.java".to_owned()]).is_ok());
-    }
-
-    #[test]
-    fn string_list_reads_and_errors() {
-        let block = serde_json::json!({ "sources": ["a.java", "b.java"] });
-        assert_eq!(
-            string_list(&block, "sources").expect("parses"),
-            vec!["a.java".to_owned(), "b.java".to_owned()]
-        );
-        assert!(string_list(&block, "missing").is_err());
     }
 
     #[test]

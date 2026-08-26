@@ -8,6 +8,21 @@
 //! `configure` — required for the full-world instantiation every plugin
 //! goes through — and, having no build tasks, declares no tools and
 //! accepts any well-formed module configuration.
+//!
+//! Starting with ABI 0.8 the plugin derives its config schema from a
+//! typed struct via `#[derive(UlbConfig)]`. The schema is embedded into
+//! the compiled `.wasm` as a custom section so the host can extract it
+//! without instantiating the plugin.
+
+use ulb_plugin_sdk::UlbConfig;
+
+/// Typed plugin configuration — currently empty because hello-plugin has
+/// no build tasks. The derive macro generates both `serde::Deserialize`
+/// and the schema metadata the host reads from the wasm custom section.
+#[derive(UlbConfig, serde::Deserialize)]
+pub struct PluginConfig;
+
+ulb_plugin_sdk::embed_schema!(PluginConfig);
 
 /// The whole plugin lives inside this module because the `export!` macro
 /// resolves `self::exports` relative to the module where `generate!` ran.
@@ -25,6 +40,8 @@ mod bindings {
     });
 
     use exports::ulite::ulb::ulb_plugin::{Guest, PluginManifest};
+
+    use crate::PluginConfig;
 
     /// Implements the exported `ulb-plugin` interface.
     struct HelloPlugin;
@@ -47,10 +64,9 @@ mod bindings {
         }
 
         fn configure(module_config: String) -> Result<(), String> {
-            // The hello-plugin has no tasks to register; it still parses
-            // the configuration so a malformed module block surfaces as a
-            // configure error rather than a silent success.
-            serde_json::from_str::<serde_json::Value>(&module_config)
+            // Parse into the typed config; a malformed module block
+            // surfaces as a configure error rather than a silent success.
+            serde_json::from_str::<PluginConfig>(&module_config)
                 .map_err(|error| format!("invalid module config JSON: {error}"))?;
             Ok(())
         }

@@ -19,6 +19,7 @@ following keys:
 | `sources` | list of strings | `.java` and/or `.kt` files to compile. At least one entry is required. |
 | `classesDir` | string | Directory the compilers write `.class` files to. |
 | `jarFile` | string | Output jar path the `assemble` task produces. |
+| `compose` | boolean, optional | Whether the module targets desktop Jetpack Compose. When true, the compile classpath must carry the Compose compiler plugin jar (the host injects it, along with the managed `runtime`/`ui`/`material3` deps, whenever `jvm.compose = true`); the `compile-kotlin` task passes it to `kotlinc` as `-Xplugin`. |
 | `testSources` | list of strings, optional | `.java` test files to compile. Kotlin test compilation is not supported yet. Requires `testClassesDir` and one of `testClass`/`testRunner`. |
 | `testClassesDir` | string, optional | Directory `javac` writes test `.class` files to. |
 | `testClass` | string, optional | Fully qualified class with a `main` method that the `test` task runs. Mutually exclusive with `testRunner`. |
@@ -156,7 +157,7 @@ list that a task's static inputs cannot enumerate after KSP has run.
 |---|---|---|
 | `ksp` | `java` | Runs the KSP2 command-line tool over the Kotlin sources (only when the module has `ksp` deps; see above) |
 | `compile` | `javac` | `javac -d <classesDir> [-cp <classpath.compile, colon-separated>] <java sources>` (only when the module has `.java` sources; waits for `ksp` when present) |
-| `compile-kotlin` | `kotlinc` | `kotlinc -d <classesDir> [-cp <classpath.compile:classesDir>] <kotlin sources + generated/ksp/kotlin>` (only when the module has `.kt` sources; waits for `compile` when both source sets exist and for `ksp` when present) |
+| `compile-kotlin` | `kotlinc` | `kotlinc -d <classesDir> [-cp <classpath.compile:classesDir>] [-Xplugin=<compose-compiler-plugin jar>] <kotlin sources + generated/ksp/kotlin>` (only when the module has `.kt` sources; waits for `compile` when both source sets exist and for `ksp` when present; `-Xplugin` only when `jvm.compose` is true) |
 | `assemble` | `jar` | `jar cf <jarFile> -C <classesDir> .` (after the present compile tasks) |
 | `generate-test-runner` | — | Writes `build/generated-test-src/ulite/TestRunner.java` (only with `testRunner = "junit-platform"`) |
 | `compile-tests` | `javac` | `javac -d <testClassesDir> -cp <classpath.testCompile:classesDir> <testSources>` — plus the generated runner source when `testRunner` is set (only when the test keys are set) |

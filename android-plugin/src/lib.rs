@@ -634,8 +634,8 @@ mod bindings {
                 let compose_compiler_jar = if compose {
                     Some(find_compose_compiler_jar(&classpath).ok_or_else(|| {
                         "compose = true but the compose compiler plugin JAR was not found on the \
-                         compile classpath; add a dependency such as \
-                         \"org.jetbrains.kotlin:compose-compiler-plugin:<kotlin-version>\""
+                         compile classpath; the host injects it when a module declares \
+                         compose = true"
                             .to_owned()
                     })?)
                 } else {

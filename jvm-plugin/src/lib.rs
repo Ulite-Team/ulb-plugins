@@ -38,7 +38,13 @@ use ulb_plugin_sdk::UlbConfig;
 pub struct PluginConfig {
     /// The project directory the build was started for. All relative
     /// paths in the `jvm {}` block are resolved against this directory.
+    ///
+    /// The host hands the project directory over under the `projectDir`
+    /// key (the same name the DSL uses), so the serde key must match that
+    /// spelling for typed deserialization; `#[ulb(rename)]` only affects
+    /// the emitted schema, not serde's field lookup.
     #[ulb(rename = "projectDir")]
+    #[serde(rename = "projectDir")]
     pub project_dir: String,
 
     /// Host-resolved dependency classpaths, keyed by scope name.
@@ -89,11 +95,13 @@ pub struct JvmConfig {
     /// Directory the compilers write `.class` files into. Relative
     /// paths are resolved against the project directory.
     #[ulb(rename = "classesDir")]
+    #[serde(rename = "classesDir")]
     pub classes_dir: String,
 
     /// Output jar path the `assemble` task produces. Relative paths
     /// are resolved against the project directory.
     #[ulb(rename = "jarFile")]
+    #[serde(rename = "jarFile")]
     pub jar_file: String,
 
     /// `.java` test source files to compile. Kotlin test compilation is
@@ -670,9 +678,10 @@ fn ksp_args(
 #[cfg(test)]
 mod tests {
     use super::{
-        TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args, find_compose_compiler_jar,
-        jar_args, kotlinc_args, ksp_args, ksp_output_dirs, map_compose_error, partition_sources,
-        reject_unknown_extensions, resolve_path, run_test_args,
+        PluginConfig, TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args,
+        find_compose_compiler_jar, jar_args, kotlinc_args, ksp_args, ksp_output_dirs,
+        map_compose_error, partition_sources, reject_unknown_extensions, resolve_path,
+        run_test_args,
     };
 
     #[test]
@@ -960,6 +969,34 @@ mod tests {
                 "ulite.TestRunner".to_owned(),
                 "/proj/build/test-classes".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn typed_config_deserializes_from_host_shaped_keys() {
+        let module_config = r#"{
+            "projectDir": "/proj",
+            "classpath": {
+                "compile": ["/repos/core.jar"],
+                "testCompile": ["/repos/test.jar"],
+                "testRuntime": []
+            },
+            "jvm": {
+                "sources": ["src/App.kt"],
+                "classesDir": "build/classes",
+                "jarFile": "build/app.jar",
+                "compose": true
+            }
+        }"#;
+        let config: PluginConfig = serde_json::from_str(module_config).expect("typed config");
+        assert_eq!(config.project_dir, "/proj");
+        assert_eq!(config.jvm.classes_dir, "build/classes");
+        assert_eq!(config.jvm.jar_file, "build/app.jar");
+        assert_eq!(config.jvm.compose, Some(true));
+        assert_eq!(config.classpath.compile, vec!["/repos/core.jar".to_owned()]);
+        assert_eq!(
+            config.classpath.test_compile,
+            vec!["/repos/test.jar".to_owned()]
         );
     }
 }

@@ -19,7 +19,7 @@ following keys:
 | `sources` | list of strings | `.java` and/or `.kt` files to compile. At least one entry is required. |
 | `classesDir` | string | Directory the compilers write `.class` files to. |
 | `jarFile` | string | Output jar path the `assemble` task produces. |
-| `compose` | boolean, optional | Whether the module targets desktop Jetpack Compose. When true, the compile classpath must carry the Compose compiler plugin jar (the host injects it, along with the managed `runtime`/`ui`/`material3` deps, whenever `jvm.compose = true`); the `compile-kotlin` task passes it to `kotlinc` as `-Xplugin`. |
+| `compose` | boolean, optional | Whether the module targets desktop Jetpack Compose. When true, the compile classpath must carry the Compose compiler plugin jar (the host injects it, along with the managed `runtime`/`ui`/`material3` deps, whenever `jvm.compose = true`); the `compile-kotlin` task passes it to `kotlinc` as `-Xplugin`. Note: the managed `runtime`/`ui`/`material3` artifacts are Android AARs and the host's resolver currently materializes only `jar` packaging, so the `@Composable` API classes are not on the compile classpath yet; a real `@Composable` compile additionally requires a kotlinc host. |
 | `testSources` | list of strings, optional | `.java` test files to compile. Kotlin test compilation is not supported yet. Requires `testClassesDir` and one of `testClass`/`testRunner`. |
 | `testClassesDir` | string, optional | Directory `javac` writes test `.class` files to. |
 | `testClass` | string, optional | Fully qualified class with a `main` method that the `test` task runs. Mutually exclusive with `testRunner`. |

@@ -568,15 +568,15 @@ fn kotlinc_args(
 }
 
 /// Finds the Compose compiler plugin jar among the compile classpath
-/// entries by filename: the artifact is `compose-compiler-plugin` and,
-/// when resolved from a Maven repo, its jar path ends
-/// `<version>/compose-compiler-plugin-<version>.jar`. The host injects
-/// this artifact whenever `jvm.compose = true`, so a compose module
-/// should always find it here.
+/// entries by filename: the artifact is `kotlin-compose-compiler-plugin`
+/// and, when resolved from a Maven repo, its jar path ends
+/// `<version>/kotlin-compose-compiler-plugin-<version>.jar`. The host
+/// injects this artifact whenever `jvm.compose = true`, so a compose
+/// module should always find it here.
 fn find_compose_compiler_jar(classpath: &[String]) -> Option<String> {
     classpath
         .iter()
-        .find(|entry| entry.contains("compose-compiler-plugin") && entry.ends_with(".jar"))
+        .find(|entry| entry.contains("kotlin-compose-compiler-plugin") && entry.ends_with(".jar"))
         .cloned()
 }
 
@@ -717,7 +717,7 @@ mod tests {
             "/proj/build/classes",
             &["/cache/one.jar".to_owned()],
             &["/proj/src/App.kt".to_owned()],
-            Some("/cache/kotlin/compose-compiler-plugin-2.3.10.jar"),
+            Some("/cache/kotlin/kotlin-compose-compiler-plugin-2.3.10.jar"),
         );
         assert_eq!(
             args,
@@ -726,7 +726,7 @@ mod tests {
                 "/proj/build/classes".to_owned(),
                 "-cp".to_owned(),
                 "/cache/one.jar".to_owned(),
-                "-Xplugin=/cache/kotlin/compose-compiler-plugin-2.3.10.jar".to_owned(),
+                "-Xplugin=/cache/kotlin/kotlin-compose-compiler-plugin-2.3.10.jar".to_owned(),
                 "/proj/src/App.kt".to_owned(),
             ]
         );
@@ -756,12 +756,12 @@ mod tests {
     fn compose_jar_is_found_among_compile_classpath_entries() {
         let classpath = vec![
             "/cache/androidx/runtime.jar".to_owned(),
-            "/cache/kotlin/compose-compiler-plugin-2.3.10.jar".to_owned(),
+            "/cache/kotlin/kotlin-compose-compiler-plugin-2.3.10.jar".to_owned(),
             "/cache/ui.jar".to_owned(),
         ];
         assert_eq!(
             find_compose_compiler_jar(&classpath).as_deref(),
-            Some("/cache/kotlin/compose-compiler-plugin-2.3.10.jar")
+            Some("/cache/kotlin/kotlin-compose-compiler-plugin-2.3.10.jar")
         );
     }
 

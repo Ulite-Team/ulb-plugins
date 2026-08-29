@@ -13,7 +13,7 @@
         "0.5.0": {
           "abi": {
             "min": "0.7",
-            "max": "0.7"
+            "max": "0.8"
           },
           "artifact_url": "https://github.com/Ulite-Team/ulb-plugins/releases/download/hello-plugin-v0.5.0/hello_plugin.wasm"
         }
@@ -31,7 +31,7 @@
         "0.6.0": {
           "abi": {
             "min": "0.7",
-            "max": "0.7"
+            "max": "0.8"
           },
           "artifact_url": "https://github.com/Ulite-Team/ulb-plugins/releases/download/jvm-plugin-v0.6.0/jvm_plugin.wasm"
         }
@@ -49,7 +49,7 @@
         "0.3.0": {
           "abi": {
             "min": "0.7",
-            "max": "0.7"
+            "max": "0.8"
           },
           "artifact_url": "https://github.com/Ulite-Team/ulb-plugins/releases/download/android-plugin-v0.3.0/android_plugin.wasm"
         }
@@ -74,7 +74,7 @@
         "0.3.0": {
           "abi": {
             "min": "0.7",
-            "max": "0.7"
+            "max": "0.8"
           },
           "artifact_url": "https://github.com/Ulite-Team/ulb-plugins/releases/download/kmp-plugin-v0.3.0/kmp_plugin.wasm"
         }

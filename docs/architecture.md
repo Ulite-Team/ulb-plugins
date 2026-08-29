@@ -9,7 +9,7 @@ A Cargo workspace (`resolver = "2"`, edition 2024) with four members:
 | `hello-plugin` (0.5.0) | `ulite/hello` | Minimal world implementation; establishes the build/test path |
 | `jvm-plugin` (0.6.0) | `ulite/jvm` | Compile Java/Kotlin, package a jar, run tests, run KSP2 |
 | `android-plugin` (0.3.0) | `ulite/android` | Discover the Android SDK toolchain; compile against the platform jar |
-| `kmp-plugin` (0.2.0) | `ulite/kmp` | Compile a Kotlin multiplatform module's shared and jvm source sets into a jar |
+| `kmp-plugin` (0.3.0) | `ulite/kmp` | Compile a Kotlin multiplatform module's shared and jvm source sets into a jar |
 
 All are `cdylib` crates, depend on `ulb-plugin-sdk` by path
 (`../../Uliab/crates/ulb-plugin-sdk`), and share the workspace's

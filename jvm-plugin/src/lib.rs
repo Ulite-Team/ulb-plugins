@@ -562,9 +562,9 @@ fn compile_args(classes_dir: &str, classpath: &[String], sources: &[String]) -> 
 
 /// The `kotlinc` invocation for the Kotlin compile task. When a Compose
 /// compiler plugin jar is present, loads it via `-Xplugin=<jar>` so
-/// `@Composable` sources compile; otherwise falls back to the plain
-/// compiler shape, keeping an empty compose jar (or a non-compose
-/// module) identical to the shared `compile_args` output.
+/// `@Composable` sources compile. When no plugin jar is passed — a
+/// non-Compose module, or one whose classpath lacks the jar — the
+/// invocation is identical to the shared `compile_args` output.
 fn kotlinc_args(
     classes_dir: &str,
     classpath: &[String],
@@ -597,6 +597,11 @@ fn find_compose_compiler_jar(classpath: &[String]) -> Option<String> {
 
 /// Renders the "missing compose compiler jar" case as an actionable
 /// configure error rather than an `Option` the caller must flatten.
+///
+/// # Errors
+///
+/// Returns the actionable message when `found` is `None`, i.e. the
+/// compose compiler plugin jar is not on the compile classpath.
 fn map_compose_error(found: Option<String>) -> Result<String, String> {
     found.ok_or_else(|| {
         "jvm.compose = true but the compose compiler plugin JAR was not found on the \

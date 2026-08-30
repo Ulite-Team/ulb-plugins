@@ -215,7 +215,14 @@ mod bindings {
                 task_registrar::register_task(&Task {
                     name: "ksp".to_owned(),
                     inputs: kotlin_sources.clone(),
-                    outputs: vec![kotlin_out.clone(), java_out.clone()],
+                    // Only the Kotlin output dir is required: KSP2 creates it
+                    // for a processor's generated Kotlin, but a processor that
+                    // emits no `.java` never creates the java dir, and the host
+                    // rejects a declared output the action does not produce.
+                    // `-java-output-dir` is still passed so KSP generates into
+                    // it when it does emit java; it is just not a required
+                    // output here.
+                    outputs: vec![kotlin_out.clone()],
                     depends_on: Vec::new(),
                     action: Action::RunTool(RunToolArgs {
                         tool: AllowlistedTool::Java,

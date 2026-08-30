@@ -38,7 +38,13 @@ use ulb_plugin_sdk::UlbConfig;
 pub struct PluginConfig {
     /// The project directory the build was started for. All relative
     /// paths in the `jvm {}` block are resolved against this directory.
+    ///
+    /// The host hands the project directory over under the `projectDir`
+    /// key (the same name the DSL uses), so the serde key must match that
+    /// spelling for typed deserialization; `#[ulb(rename)]` only affects
+    /// the emitted schema, not serde's field lookup.
     #[ulb(rename = "projectDir")]
+    #[serde(rename = "projectDir")]
     pub project_dir: String,
 
     /// Host-resolved dependency classpaths, keyed by scope name.
@@ -89,11 +95,13 @@ pub struct JvmConfig {
     /// Directory the compilers write `.class` files into. Relative
     /// paths are resolved against the project directory.
     #[ulb(rename = "classesDir")]
+    #[serde(rename = "classesDir")]
     pub classes_dir: String,
 
     /// Output jar path the `assemble` task produces. Relative paths
     /// are resolved against the project directory.
     #[ulb(rename = "jarFile")]
+    #[serde(rename = "jarFile")]
     pub jar_file: String,
 
     /// `.java` test source files to compile. Kotlin test compilation is
@@ -127,6 +135,14 @@ pub struct JvmConfig {
     /// classes directory. Mutually exclusive with `test_class`.
     #[serde(rename = "testRunner")]
     pub test_runner: Option<String>,
+
+    /// Whether the module uses Jetpack Compose (desktop/JVM target).
+    /// When true, the compose compiler plugin JAR must be present on the
+    /// compile classpath; the host injects it alongside the Compose
+    /// runtime deps when `jvm.compose = true`. The kotlinc invocation
+    /// then passes the plugin jar via `-Xplugin`.
+    #[serde(default)]
+    pub compose: Option<bool>,
 }
 
 mod bindings {
@@ -142,8 +158,9 @@ mod bindings {
 
     use crate::{
         JvmConfig, PluginConfig, TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args,
-        jar_args, ksp_args, ksp_output_dirs, partition_sources, reject_unknown_extensions,
-        resolve_path, run_test_args,
+        find_compose_compiler_jar, jar_args, kotlinc_args, ksp_args, ksp_output_dirs,
+        map_compose_error, partition_sources, reject_unknown_extensions, resolve_path,
+        run_test_args,
     };
     use exports::ulite::ulb::ulb_plugin::{Guest, PluginManifest};
     use ulb_plugin_sdk::embed_schema;
@@ -198,7 +215,14 @@ mod bindings {
                 task_registrar::register_task(&Task {
                     name: "ksp".to_owned(),
                     inputs: kotlin_sources.clone(),
-                    outputs: vec![kotlin_out.clone(), java_out.clone()],
+                    // Only the Kotlin output dir is required: KSP2 creates it
+                    // for a processor's generated Kotlin, but a processor that
+                    // emits no `.java` never creates the java dir, and the host
+                    // rejects a declared output the action does not produce.
+                    // `-java-output-dir` is still passed so KSP generates into
+                    // it when it does emit java; it is just not a required
+                    // output here.
+                    outputs: vec![kotlin_out.clone()],
                     depends_on: Vec::new(),
                     action: Action::RunTool(RunToolArgs {
                         tool: AllowlistedTool::Java,
@@ -245,6 +269,13 @@ mod bindings {
                 }
                 let mut kotlin_classpath = compile_classpath.clone();
                 kotlin_classpath.push(classes_dir.clone());
+                let compose_plugin = if config.jvm.compose.unwrap_or(false) {
+                    Some(map_compose_error(find_compose_compiler_jar(
+                        compile_classpath,
+                    ))?)
+                } else {
+                    None
+                };
                 task_registrar::register_task(&Task {
                     name: "compile-kotlin".to_owned(),
                     inputs: kotlinc_sources.clone(),
@@ -252,7 +283,12 @@ mod bindings {
                     depends_on,
                     action: Action::RunTool(RunToolArgs {
                         tool: AllowlistedTool::Kotlinc,
-                        args: compile_args(&classes_dir, &kotlin_classpath, &kotlinc_sources),
+                        args: kotlinc_args(
+                            &classes_dir,
+                            &kotlin_classpath,
+                            &kotlinc_sources,
+                            compose_plugin.as_deref(),
+                        ),
                         cwd: ".".to_owned(),
                     }),
                 })?;
@@ -524,6 +560,56 @@ fn compile_args(classes_dir: &str, classpath: &[String], sources: &[String]) -> 
     args
 }
 
+/// The `kotlinc` invocation for the Kotlin compile task. When a Compose
+/// compiler plugin jar is present, loads it via `-Xplugin=<jar>` so
+/// `@Composable` sources compile. When no plugin jar is passed — a
+/// non-Compose module, or one whose classpath lacks the jar — the
+/// invocation is identical to the shared `compile_args` output.
+fn kotlinc_args(
+    classes_dir: &str,
+    classpath: &[String],
+    sources: &[String],
+    compose_compiler_jar: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec!["-d".to_owned(), classes_dir.to_owned()];
+    if !classpath.is_empty() {
+        args.extend(["-cp".to_owned(), classpath.join(":")]);
+    }
+    if let Some(jar) = compose_compiler_jar {
+        args.push(format!("-Xplugin={jar}"));
+    }
+    args.extend(sources.iter().cloned());
+    args
+}
+
+/// Finds the Compose compiler plugin jar among the compile classpath
+/// entries by filename: the artifact is `kotlin-compose-compiler-plugin`
+/// and, when resolved from a Maven repo, its jar path ends
+/// `<version>/kotlin-compose-compiler-plugin-<version>.jar`. The host
+/// injects this artifact whenever `jvm.compose = true`, so a compose
+/// module should always find it here.
+fn find_compose_compiler_jar(classpath: &[String]) -> Option<String> {
+    classpath
+        .iter()
+        .find(|entry| entry.contains("kotlin-compose-compiler-plugin") && entry.ends_with(".jar"))
+        .cloned()
+}
+
+/// Renders the "missing compose compiler jar" case as an actionable
+/// configure error rather than an `Option` the caller must flatten.
+///
+/// # Errors
+///
+/// Returns the actionable message when `found` is `None`, i.e. the
+/// compose compiler plugin jar is not on the compile classpath.
+fn map_compose_error(found: Option<String>) -> Result<String, String> {
+    found.ok_or_else(|| {
+        "jvm.compose = true but the compose compiler plugin JAR was not found on the \
+         compile classpath; the host injects it when the module declares jvm.compose = true"
+            .to_owned()
+    })
+}
+
 /// The `jar` invocation for an assemble task: create the jar and pack
 /// the classes directory.
 fn jar_args(jar_file: &str, classes_dir: &str) -> Vec<String> {
@@ -604,8 +690,10 @@ fn ksp_args(
 #[cfg(test)]
 mod tests {
     use super::{
-        TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args, jar_args, ksp_args,
-        ksp_output_dirs, partition_sources, reject_unknown_extensions, resolve_path, run_test_args,
+        PluginConfig, TEST_RUNNER_SOURCE, TEST_RUNNER_SOURCE_PATH, compile_args,
+        find_compose_compiler_jar, jar_args, kotlinc_args, ksp_args, ksp_output_dirs,
+        map_compose_error, partition_sources, reject_unknown_extensions, resolve_path,
+        run_test_args,
     };
 
     #[test]
@@ -641,6 +729,83 @@ mod tests {
                 "/proj/build/classes".to_owned(),
                 "/proj/src/App.java".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn kotlinc_invocation_loads_compose_plugin_via_xplugin() {
+        let args = kotlinc_args(
+            "/proj/build/classes",
+            &["/cache/one.jar".to_owned()],
+            &["/proj/src/App.kt".to_owned()],
+            Some("/cache/kotlin/kotlin-compose-compiler-plugin-2.3.10.jar"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "-d".to_owned(),
+                "/proj/build/classes".to_owned(),
+                "-cp".to_owned(),
+                "/cache/one.jar".to_owned(),
+                "-Xplugin=/cache/kotlin/kotlin-compose-compiler-plugin-2.3.10.jar".to_owned(),
+                "/proj/src/App.kt".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn kotlinc_invocation_matches_plain_shape_without_compose() {
+        let args = kotlinc_args(
+            "/proj/build/classes",
+            &["/cache/one.jar".to_owned()],
+            &["/proj/src/App.kt".to_owned()],
+            None,
+        );
+        assert_eq!(
+            args,
+            vec![
+                "-d".to_owned(),
+                "/proj/build/classes".to_owned(),
+                "-cp".to_owned(),
+                "/cache/one.jar".to_owned(),
+                "/proj/src/App.kt".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn compose_jar_is_found_among_compile_classpath_entries() {
+        let classpath = vec![
+            "/cache/androidx/runtime.jar".to_owned(),
+            "/cache/kotlin/kotlin-compose-compiler-plugin-2.3.10.jar".to_owned(),
+            "/cache/ui.jar".to_owned(),
+        ];
+        assert_eq!(
+            find_compose_compiler_jar(&classpath).as_deref(),
+            Some("/cache/kotlin/kotlin-compose-compiler-plugin-2.3.10.jar")
+        );
+    }
+
+    #[test]
+    fn compose_jar_is_absent_when_not_on_classpath() {
+        let classpath = vec![
+            "/cache/androidx/runtime.jar".to_owned(),
+            "/cache/ui.jar".to_owned(),
+        ];
+        assert_eq!(find_compose_compiler_jar(&classpath), None);
+        assert!(map_compose_error(find_compose_compiler_jar(&classpath)).is_err());
+    }
+
+    #[test]
+    fn compose_error_is_actionable_when_jar_missing() {
+        let error = map_compose_error(None).unwrap_err();
+        assert!(
+            error.contains("jvm.compose = true"),
+            "error should mention jvm.compose: {error}"
+        );
+        assert!(
+            error.contains("compose compiler plugin"),
+            "error should name the missing jar: {error}"
         );
     }
 
@@ -816,6 +981,34 @@ mod tests {
                 "ulite.TestRunner".to_owned(),
                 "/proj/build/test-classes".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn typed_config_deserializes_from_host_shaped_keys() {
+        let module_config = r#"{
+            "projectDir": "/proj",
+            "classpath": {
+                "compile": ["/repos/core.jar"],
+                "testCompile": ["/repos/test.jar"],
+                "testRuntime": []
+            },
+            "jvm": {
+                "sources": ["src/App.kt"],
+                "classesDir": "build/classes",
+                "jarFile": "build/app.jar",
+                "compose": true
+            }
+        }"#;
+        let config: PluginConfig = serde_json::from_str(module_config).expect("typed config");
+        assert_eq!(config.project_dir, "/proj");
+        assert_eq!(config.jvm.classes_dir, "build/classes");
+        assert_eq!(config.jvm.jar_file, "build/app.jar");
+        assert_eq!(config.jvm.compose, Some(true));
+        assert_eq!(config.classpath.compile, vec!["/repos/core.jar".to_owned()]);
+        assert_eq!(
+            config.classpath.test_compile,
+            vec!["/repos/test.jar".to_owned()]
         );
     }
 }

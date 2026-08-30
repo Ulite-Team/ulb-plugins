@@ -634,8 +634,8 @@ mod bindings {
                 let compose_compiler_jar = if compose {
                     Some(find_compose_compiler_jar(&classpath).ok_or_else(|| {
                         "compose = true but the compose compiler plugin JAR was not found on the \
-                         compile classpath; add a dependency such as \
-                         \"org.jetbrains.kotlin:compose-compiler-plugin:<kotlin-version>\""
+                         compile classpath; the host injects it when a module declares \
+                         compose = true"
                             .to_owned()
                     })?)
                 } else {
@@ -1269,13 +1269,14 @@ fn compile_args(
     args
 }
 
-/// The compose compiler plugin JAR is a Maven artifact whose filename
-/// contains `compose-compiler-plugin`.  Scanning the compile classpath
-/// avoids hard-coding an artifact coordinate or path convention.
+/// The compose compiler plugin JAR is the Maven artifact
+/// `kotlin-compose-compiler-plugin`, whose resolved jar filename contains
+/// `kotlin-compose-compiler-plugin`. Scanning the compile classpath avoids
+/// hard-coding an artifact coordinate or path convention.
 fn find_compose_compiler_jar(classpath: &[String]) -> Option<String> {
     classpath
         .iter()
-        .find(|p| p.contains("compose-compiler-plugin") && p.ends_with(".jar"))
+        .find(|p| p.contains("kotlin-compose-compiler-plugin") && p.ends_with(".jar"))
         .cloned()
 }
 
@@ -2048,10 +2049,10 @@ mod tests {
             "/sdk/platforms/android-36/android.jar",
             &[],
             &["/proj/src/Main.kt".to_owned()],
-            Some("/maven/compose-compiler-plugin-2.0.jar"),
+            Some("/maven/kotlin-compose-compiler-plugin-2.0.jar"),
         );
         assert!(
-            args.contains(&"-Xplugin=/maven/compose-compiler-plugin-2.0.jar".to_owned()),
+            args.contains(&"-Xplugin=/maven/kotlin-compose-compiler-plugin-2.0.jar".to_owned()),
             "compose JAR must be loaded via -Xplugin=<path>, got: {args:?}"
         );
     }
@@ -2075,11 +2076,11 @@ mod tests {
     fn find_compose_compiler_jar_matches_jar_filename() {
         let cp = vec![
             "/maven/appcompat-1.7.0.jar".to_owned(),
-            "/maven/compose-compiler-plugin-2.0.0.jar".to_owned(),
+            "/maven/kotlin-compose-compiler-plugin-2.0.0.jar".to_owned(),
         ];
         assert_eq!(
             find_compose_compiler_jar(&cp),
-            Some("/maven/compose-compiler-plugin-2.0.0.jar".to_owned())
+            Some("/maven/kotlin-compose-compiler-plugin-2.0.0.jar".to_owned())
         );
     }
 

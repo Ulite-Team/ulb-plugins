@@ -1350,8 +1350,7 @@ fn d8_args(
 /// runtime `classes.jar` files from the host-injected `composeRuntimes`
 /// bucket when the module enables Compose and the variant compiles Kotlin
 /// (the `@Composable` lowering emits calls into exactly those types, so the
-/// link step must bundle them — the host resolves them specifically for
-/// this, keeping them separate from the flat compile classpath).
+/// link step must bundle them alongside the module's own classes).
 fn extra_d8_jars(
     classpath: &[String],
     compose_runtimes: &[String],
@@ -1361,7 +1360,10 @@ fn extra_d8_jars(
     let mut jars = Vec::new();
     if has_kotlin
         && let Some(stdlib) = classpath.iter().find(|j| {
-            j.contains("kotlin-stdlib") && j.ends_with(".jar") && !j.ends_with("-sources.jar")
+            j.contains("kotlin-stdlib")
+                && !j.contains("-jdk")
+                && j.ends_with(".jar")
+                && !j.ends_with("-sources.jar")
         })
     {
         jars.push(stdlib.clone());
@@ -1694,6 +1696,16 @@ mod tests {
         let runtimes = vec!["/libs/runtime-classes.jar".to_owned()];
         assert!(extra_d8_jars(&[], &runtimes, true, false).is_empty());
         assert!(extra_d8_jars(&[], &runtimes, false, true).is_empty());
+    }
+
+    #[test]
+    fn extra_d8_jars_bundles_the_core_stdlib_jar_over_the_jdk8_bridge() {
+        let classpath = vec![
+            "/libs/kotlin-stdlib-jdk8-2.0.0.jar".to_owned(),
+            "/libs/kotlin-stdlib-2.0.0.jar".to_owned(),
+        ];
+        let jars = extra_d8_jars(&classpath, &[], true, false);
+        assert_eq!(jars, vec!["/libs/kotlin-stdlib-2.0.0.jar".to_owned()]);
     }
 
     #[test]

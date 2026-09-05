@@ -1138,7 +1138,12 @@ jobs:
           # generated GreetingKt class, plus GapComposer, an implementation
           # class the generated code never names directly and so is only
           # present when the unwrapped runtime classes.jar were fed to d8.
+          # The dex strings are extracted to a file first: a `grep -q` at the
+          # head of a pipe closes it on the first match, and under pipefail
+          # the still-writing producer then SIGPIPEs the pipeline to a false
+          # 141.
           unzip -p /tmp/android-compose/build/android/debug/app-debug.apk classes.dex \
-            | strings | grep -q 'Lcom/example/ulite/GreetingKt;'
-          unzip -p /tmp/android-compose/build/android/debug/app-debug.apk classes.dex \
-            | strings | grep -q 'Landroidx/compose/runtime/GapComposer;'
+            > /tmp/android-compose/app-debug.dex
+          strings /tmp/android-compose/app-debug.dex > /tmp/android-compose/dex-strings.txt
+          grep -q 'Lcom/example/ulite/GreetingKt;' /tmp/android-compose/dex-strings.txt
+          grep -q 'Landroidx/compose/runtime/GapComposer;' /tmp/android-compose/dex-strings.txt

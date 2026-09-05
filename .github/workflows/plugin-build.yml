@@ -1135,10 +1135,10 @@ jobs:
           grep -q '22 ran, 0 up-to-date' <<<"$first_compose"
           # The dex holds the module's composable (compiled via the injected
           # compose compiler plugin) and the bundled Compose runtime: the
-          # generated GreetingKt class, plus ComposerImpl, an implementation
+          # generated GreetingKt class, plus GapComposer, an implementation
           # class the generated code never names directly and so is only
           # present when the unwrapped runtime classes.jar were fed to d8.
           unzip -p /tmp/android-compose/build/android/debug/app-debug.apk classes.dex \
             | strings | grep -q 'Lcom/example/ulite/GreetingKt;'
           unzip -p /tmp/android-compose/build/android/debug/app-debug.apk classes.dex \
-            | strings | grep -q 'Landroidx/compose/runtime/ComposerImpl;'
+            | strings | grep -q 'Landroidx/compose/runtime/GapComposer;'

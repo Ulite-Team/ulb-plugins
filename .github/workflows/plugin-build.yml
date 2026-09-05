@@ -1064,3 +1064,86 @@ jobs:
           grep -q 'resources.arsc' /tmp/android-kt/apk.list
           unzip -p /tmp/android-kt/build/android/debug/app-debug.apk classes.dex \
             | strings | grep -q 'Lcom/example/ulite/Main;'
+          # ---- Compose android module ----
+          # Proves the Compose chain end to end against real artifacts: the
+          # host injects the compose BOM, the runtime/ui/material3 libraries
+          # (Android AARs the resolver unwraps to their classes.jar for the
+          # compile classpath), and the compose compiler plugin jar; kotlinc
+          # lowers the @Composable source with -Xplugin; and d8 dexes the
+          # unwrapped runtime alongside the module classes so the APK ships
+          # the Compose types the generated code calls into.
+          mkdir -p /tmp/android-compose/src /tmp/android-compose/res/values
+          cat > /tmp/android-compose/src/Greeting.kt <<'KOTLIN'
+          package com.example.ulite
+
+          import androidx.compose.material3.Text
+          import androidx.compose.runtime.Composable
+
+          @Composable
+          fun Greeting(name: String) {
+              Text(text = "Hello, $name!")
+          }
+          KOTLIN
+          cat > /tmp/android-compose/AndroidManifest.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.example.ulite">
+              <application android:label="@string/app_name" />
+          </manifest>
+          XML
+          cat > /tmp/android-compose/res/values/strings.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Compose CI Example</string>
+          </resources>
+          XML
+          cat > /tmp/android-compose/build.ulb <<'ULB'
+          android {
+            compileSdk = 36
+            minSdk = 21
+            namespace = "com.example.ulite"
+            sources = ["src/Greeting.kt"]
+            manifest = "AndroidManifest.xml"
+            resDir = "res"
+            compose = true
+          }
+          ULB
+          printf 'plugins {\n  android = "ulite/android" @ "0.3.0"\n}\n' > /tmp/android-compose/libs.ulb
+          cp "$GITHUB_WORKSPACE/ulb-plugins/target/wasm32-wasip2/release/android_plugin.wasm" /tmp/android-compose/android_plugin.wasm
+          cat > /tmp/android-compose/index.json <<'JSON'
+          {
+            "schema_version": 1,
+            "plugins": {
+              "ulite/android": {
+                "versions": {
+                  "0.3.0": {
+                    "abi": { "min": "0.7", "max": "0.8" },
+                    "artifact_url": "android_plugin.wasm"
+                  }
+                }
+              }
+            }
+          }
+          JSON
+          cache3="$(mktemp -d)"
+          build_compose() {
+            "$uliab" build --project /tmp/android-compose \
+              --registry /tmp/android-compose/index.json --cache-dir "$cache3" --android-sdk "$ANDROID_HOME"
+          }
+          first_compose="$(build_compose)"
+          echo "$first_compose"
+          grep -q '22 ran, 0 up-to-date' <<<"$first_compose"
+          # The dex holds the module's composable (compiled via the injected
+          # compose compiler plugin) and the bundled Compose runtime: the
+          # generated GreetingKt class, plus GapComposer, an implementation
+          # class the generated code never names directly and so is only
+          # present when the unwrapped runtime classes.jar were fed to d8.
+          # The dex strings are extracted to a file first: a `grep -q` at the
+          # head of a pipe closes it on the first match, and under pipefail
+          # the still-writing producer then SIGPIPEs the pipeline to a false
+          # 141.
+          unzip -p /tmp/android-compose/build/android/debug/app-debug.apk classes.dex \
+            > /tmp/android-compose/app-debug.dex
+          strings /tmp/android-compose/app-debug.dex > /tmp/android-compose/dex-strings.txt
+          grep -q 'Lcom/example/ulite/GreetingKt;' /tmp/android-compose/dex-strings.txt
+          grep -q 'Landroidx/compose/runtime/GapComposer;' /tmp/android-compose/dex-strings.txt

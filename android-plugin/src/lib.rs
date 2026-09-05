@@ -232,10 +232,11 @@ mod bindings {
     use crate::AndroidPluginConfig;
     use crate::{
         BuildConfigParams, android_jar, bool_value, classpath_bucket, compile_args,
-        compute_variants, d8_args, find_compose_compiler_jar, generate_buildconfig_source,
-        highest_build_tools, int_value, kotlinc_android_args, merge_variant_sources, package_args,
-        parse_build_config_fields, partition_sources, reject_unknown_extensions, resolve_path,
-        resolve_sdk_root, rgen_java_path, string_list, string_value, to_pascal_case,
+        compute_variants, d8_args, extra_d8_jars, find_compose_compiler_jar,
+        generate_buildconfig_source, highest_build_tools, int_value, kotlinc_android_args,
+        merge_variant_sources, package_args, parse_build_config_fields, partition_sources,
+        reject_unknown_extensions, resolve_path, resolve_sdk_root, rgen_java_path, string_list,
+        string_value, to_pascal_case,
     };
     use exports::ulite::ulb::ulb_plugin::{Guest, PluginManifest};
     use serde_json::Value;
@@ -442,19 +443,19 @@ mod bindings {
 
                 // When THIS variant's merged sources contain Kotlin, resolve
                 // kotlin-stdlib from the compile classpath so D8 dexes it
-                // into the APK. kotlinc bundles stdlib on its own classpath
+                // into the APK (kotlinc bundles stdlib on its own classpath
                 // during compilation, but the resulting bytecode references
-                // stdlib types that must also be present in the dex output.
-                let mut d8_extra_jars: Vec<String> = Vec::new();
-                if !variant_kotlin_sources.is_empty()
-                    && let Some(stdlib) = classpath.iter().find(|j| {
-                        j.contains("kotlin-stdlib")
-                            && j.ends_with(".jar")
-                            && !j.ends_with("-sources.jar")
-                    })
-                {
-                    d8_extra_jars.push(stdlib.clone());
-                }
+                // stdlib types that must also be present in the dex output),
+                // and — when the module enables Compose — the host's
+                // `composeRuntimes` bucket so the runtime types the
+                // @Composable lowering emits are dexed too.
+                let compose_runtimes = classpath_bucket(&config, "composeRuntimes");
+                let d8_extra_jars = extra_d8_jars(
+                    &classpath,
+                    &compose_runtimes,
+                    !variant_kotlin_sources.is_empty(),
+                    compose,
+                );
 
                 run_tool_task(
                     &format!("prepareApk{}", variant.name),
@@ -1343,6 +1344,36 @@ fn d8_args(
     args
 }
 
+/// The jars d8 dexes alongside the module's classes: `kotlin-stdlib.jar`
+/// when the variant compiles Kotlin (the compiled bytecode references
+/// stdlib types that must be present in the dex output), and the Compose
+/// runtime `classes.jar` files from the host-injected `composeRuntimes`
+/// bucket when the module enables Compose and the variant compiles Kotlin
+/// (the `@Composable` lowering emits calls into exactly those types, so the
+/// link step must bundle them alongside the module's own classes).
+fn extra_d8_jars(
+    classpath: &[String],
+    compose_runtimes: &[String],
+    has_kotlin: bool,
+    compose: bool,
+) -> Vec<String> {
+    let mut jars = Vec::new();
+    if has_kotlin
+        && let Some(stdlib) = classpath.iter().find(|j| {
+            j.contains("kotlin-stdlib")
+                && !j.contains("-jdk")
+                && j.ends_with(".jar")
+                && !j.ends_with("-sources.jar")
+        })
+    {
+        jars.push(stdlib.clone());
+    }
+    if compose && has_kotlin {
+        jars.extend(compose_runtimes.iter().cloned());
+    }
+    jars
+}
+
 /// Reads an optional integer key of the module block: `Ok(None)` when the
 /// key is absent, `Ok(Some(n))` when it holds a number, and an error when a
 /// supplied value is not a number — `targetSdk = "36"` must fail configure
@@ -1503,7 +1534,7 @@ fn package_args(apk: &std::path::Path, dex_dir: &std::path::Path) -> Vec<String>
 mod tests {
     use super::{
         BuildConfigField, BuildConfigParams, FlavorInfo, android_jar, bool_value, classpath_bucket,
-        compile_args, compute_variants, d8_args, find_compose_compiler_jar,
+        compile_args, compute_variants, d8_args, extra_d8_jars, find_compose_compiler_jar,
         generate_buildconfig_source, highest_build_tools, int_value, kotlinc_android_args,
         merge_variant_sources, optional_int, package_args, parse_build_config_fields,
         partition_sources, reject_unknown_extensions, resolve_path, resolve_sdk_root,
@@ -1645,6 +1676,36 @@ mod tests {
         );
         assert!(args.contains(&"/libs/kotlin-stdlib-2.0.0.jar".to_owned()));
         assert_eq!(args.len(), 11);
+    }
+
+    #[test]
+    fn extra_d8_jars_bundles_compose_runtimes_when_the_variant_compiles_kotlin() {
+        let classpath = vec!["/libs/kotlin-stdlib-2.0.0.jar".to_owned()];
+        let runtimes = vec![
+            "/libs/runtime-classes.jar".to_owned(),
+            "/libs/ui-classes.jar".to_owned(),
+        ];
+        let jars = extra_d8_jars(&classpath, &runtimes, true, true);
+        assert!(jars.contains(&"/libs/kotlin-stdlib-2.0.0.jar".to_owned()));
+        assert!(jars.contains(&"/libs/runtime-classes.jar".to_owned()));
+        assert!(jars.contains(&"/libs/ui-classes.jar".to_owned()));
+    }
+
+    #[test]
+    fn extra_d8_jars_omits_compose_runtimes_when_compose_is_off_or_no_kotlin() {
+        let runtimes = vec!["/libs/runtime-classes.jar".to_owned()];
+        assert!(extra_d8_jars(&[], &runtimes, true, false).is_empty());
+        assert!(extra_d8_jars(&[], &runtimes, false, true).is_empty());
+    }
+
+    #[test]
+    fn extra_d8_jars_bundles_the_core_stdlib_jar_over_the_jdk8_bridge() {
+        let classpath = vec![
+            "/libs/kotlin-stdlib-jdk8-2.0.0.jar".to_owned(),
+            "/libs/kotlin-stdlib-2.0.0.jar".to_owned(),
+        ];
+        let jars = extra_d8_jars(&classpath, &[], true, false);
+        assert_eq!(jars, vec!["/libs/kotlin-stdlib-2.0.0.jar".to_owned()]);
     }
 
     #[test]

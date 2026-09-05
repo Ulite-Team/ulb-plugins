@@ -43,6 +43,7 @@ following keys:
 | `resDir` | string | The `res/` directory `aapt2 compile` merges. Required. |
 | `sdkDir` | string, optional | Per-module SDK root, overriding the host-injected `androidSdkDir`. Relative paths resolve against the project directory. |
 | `buildConfigField` | list `[type, name, initializer]`, optional, repeatable | A custom field to emit in the generated `BuildConfig.java`. Each occurrence produces a `public static final` field. The triple's first element is the Java type, the second the field name, and the third the initializer expression (as a raw Java literal). |
+| `compose` | boolean, optional | Enables Jetpack Compose: the host injects the compose BOM, the `runtime`/`ui`/`material3` libraries, and the compose compiler plugin jar; kotlinc compiles `@Composable` sources against them via `-Xplugin`. When a variant compiles Kotlin, the unwrapped runtime classes are also dexed into the APK (see [Compose](#compose)). |
 
 The values are resolved against the project directory the host injects
 (`projectDir`); absolute paths are used as written.
@@ -72,6 +73,7 @@ but they are not part of the `android {}` block:
 | `projectDir` | The project directory the build was started for, always absolute. |
 | `androidSdkDir` | The resolved SDK root (from the host's `--android-sdk` flag or environment conventions), when one exists. |
 | `classpath.compile` | Jar paths resolved from the module's `deps {}` block for the compile scope. |
+| `classpath.composeRuntimes` | The unwrapped `classes.jar` of the injected `androidx.compose.runtime`/`ui`/`material3` artifacts. The plugin dexes these into a variant's APK when it compiles Kotlin and `compose = true`. |
 
 ## Build types and product flavors
 
@@ -141,6 +143,18 @@ leaking into other flavors' APKs. Unsupported file extensions are
 rejected on the merged list, not just the base list. The kotlin-stdlib
 jar is dexed into a variant only when that variant's merged sources
 contain `.kt` files.
+
+### Compose
+
+When `android.compose = true`, the host injects the compose BOM, the
+`androidx.compose.runtime`/`ui`/`material3` libraries, and the compose
+compiler plugin jar into the module's resolution. The compiler jar is
+picked off the compile classpath and passed to kotlinc as
+`-Xplugin=<jar>` to lower `@Composable` sources. The unwrapped runtime `classes.jar` are also fed to
+d8 alongside the module's classes and kotlin-stdlib whenever a variant
+compiles Kotlin, so the APK ships the Compose types the generated code
+calls into, not just the module's own composables. A variant with no
+`.kt` sources receives no runtime dexing (nothing was lowered).
 
 ### Variant naming
 
